@@ -42,13 +42,13 @@ runs:
     - run: "./tools/scripts/deps-download/init.sh"
       shell: "bash"
 
-    - id: "test local id"
+    - name: "test local id"
       run: |-
         id
         echo "$HOME"
       shell: "bash"
 
-    - id: "test docker id"
+    - name: "test docker id"
       run: >-
         docker run
         --user $(id -u):$(id -g)
