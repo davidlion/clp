@@ -42,6 +42,21 @@ runs:
     - run: "./tools/scripts/deps-download/init.sh"
       shell: "bash"
 
+    - id: "test local id"
+      run: |-
+        id
+        echo "$HOME"
+      shell: "bash"
+
+    - id: "test docker id"
+      run: >-
+        docker run
+        --user $(id -u):$(id -g)
+        --volume "$GITHUB_WORKSPACE":/mnt/repo
+        --workdir /mnt/repo
+        ${{steps.get_image_props.outputs.qualified_image_name}}
+        bash -c "id; echo $HOME"
+
     - run: >-
         docker run
         --user $(id -u):$(id -g)
