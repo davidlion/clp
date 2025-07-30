@@ -58,7 +58,7 @@ runs:
         --volume "$GITHUB_WORKSPACE":/mnt/repo
         --workdir /mnt/repo
         ${{steps.get_image_props.outputs.qualified_image_name}}
-        bash -c '"id; echo "home: $HOME"; ls -la "$HOME"; echo "pwd: $(pwd)"; ls -la "$(pwd)" echo "root:" ls -la "/"'
+        bash -c '"id; echo "home: \$HOME"; ls -la "\$HOME"; echo "pwd: $(pwd)"; ls -la "$(pwd)" echo "root:" ls -la "/"'
       shell: "bash"
 
     - run: >-
