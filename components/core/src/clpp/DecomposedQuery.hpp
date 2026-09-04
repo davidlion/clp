@@ -1,6 +1,7 @@
 #ifndef CLPP_DECOMPOSEDQUERY_HPP
 #define CLPP_DECOMPOSEDQUERY_HPP
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,9 +39,37 @@ public:
     };
 
     // Factory methods
-    static auto
-    decompose_query(log_surgeon::Parser& parser, std::string_view rule_name, std::string_view query)
-            -> ystdlib::error_handling::Result<DecomposedQuery>;
+    /**
+     * Decomposes a query string against a named log-surgeon rule, returning all interpretations
+     * of the query for `rule_name`.
+     *
+     * @param parser
+     * @param query
+     * @param rule_name The dot-separated log-surgeon rule name.
+     * @return A result containing the decomposed query or an error code indicating the failure:
+     * - clpp::ClppErrorCodeEnum::DecomposeQueryFailure if log-surgeon returned no interpretations.
+     */
+    static auto decompose_by_rule_name(
+            log_surgeon::Parser& parser,
+            std::string_view query,
+            std::string_view rule_name
+    ) -> ystdlib::error_handling::Result<DecomposedQuery>;
+
+    /**
+     * Decomposes a query string against a set of log shapes, returning the interpretations for each
+     * shape. Currently, shape matching is always case-sensitive.
+     *
+     * @param parser
+     * @param query
+     * @param log_shapes
+     * @return A vector of the decomposed query for every shape in `log_shapes`. The element for a
+     * shape is empty if the shape cannot match the query.
+     */
+    static auto decompose_by_log_shapes(
+            log_surgeon::Parser& parser,
+            std::string_view query,
+            std::span<std::string_view const> log_shapes
+    ) -> std::vector<DecomposedQuery>;
 
     // Methods
     [[nodiscard]] auto get_interpretations() const -> std::vector<Interpretation> const& {

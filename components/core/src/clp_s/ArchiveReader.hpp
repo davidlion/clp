@@ -5,7 +5,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -20,10 +19,13 @@
 #include <clp_s/InputConfig.hpp>
 #include <clp_s/PackedStreamReader.hpp>
 #include <clp_s/ReaderUtils.hpp>
+#include <clp_s/Schema.hpp>
 #include <clp_s/SchemaReader.hpp>
+#include <clp_s/SchemaTree.hpp>
 #include <clp_s/search/Projection.hpp>
 #include <clp_s/SingleFileArchiveDefs.hpp>
 #include <clp_s/TimestampDictionaryReader.hpp>
+#include <clpp/Defs.hpp>
 #include <clpp/LogShapeStat.hpp>
 #include <clpp/ParentRuleShapes.hpp>
 
@@ -294,18 +296,33 @@ private:
     BaseColumnReader* append_reader_column(SchemaReader& reader, int32_t column_id);
 
     /**
-     * Appends columns for the entire schema of an unordered object.
+     * Resolves the schema-tree node ID of an unordered object. Returns the root node ID stored in
+     * the object's metadata entries if present or finds the matching subtree root of the object's
+     * type in `search_root_id`'s subtree.
+     * @param obj
+     * @param search_root_id The node ID whose subtree is searched for the object's matching subtree
+     * root.
+     * @return The resolved schema-tree node ID.
+     */
+    [[nodiscard]] auto
+    resolve_unordered_object_root(UnorderedObject const& obj, int32_t search_root_id)
+            -> SchemaNode::id_t;
+
+    /**
+     * Appends columns for the sub-schema of an unordered object.
      * @param reader
      * @param mst_subtree_root_node_id
-     * @param schema_ids
+     * @param sub_schema
+     * @param log_shape_id The log shape ID if sub_schema is a `LogMessage` object.
      * @param should_marshal_records
      */
-    void append_unordered_reader_columns(
+    auto append_unordered_reader_columns(
             SchemaReader& reader,
-            int32_t mst_subtree_root_node_id,
-            std::span<Schema::id_t> schema_ids,
+            SchemaNode::id_t mst_subtree_root_node_id,
+            SchemaView sub_schema,
+            std::optional<clpp::log_shape_id_t> log_shape_id,
             bool should_marshal_records
-    );
+    ) -> void;
 
     /**
      * Reads a table with given ID from the packed stream reader. If read_stream is called

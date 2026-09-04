@@ -8,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -35,11 +34,7 @@ namespace clp_s {
  * The following NodeTypes are only used in the experimental prototype:
  *
  * `LogMessage`: Stores a structured representation of an unstructured log message. It is made up of
- * a single `LogType` node and all `CompositeVar`s and primitive type nodes that are in the message.
- *
- * `LogType`: Functionally similar to a `ClpString`, but has no variable dictionary component as the
- * variables are stored in their own nodes unlike a `ClpsString`. The logtype dictionary component
- * is identical.
+ * `ParentRule`s and primitive type nodes that are in the message.
  */
 enum class NodeType : uint8_t {
     Integer = 0,
@@ -58,10 +53,8 @@ enum class NodeType : uint8_t {
     DictionaryFloat = 13,
     Timestamp = 14,
     LogMessage = 15,
-    LogType = 16,
-    LogTypeID = 17,
-    ParentRule = 18,
-    Unknown = std::underlying_type_t<NodeType>(~0ULL)
+    ParentRule = 16,
+    Unknown = 17
 };
 
 /**
@@ -252,12 +245,12 @@ public:
     }
 
     /**
-     * Builds the column name for a node by walking up to (but not including) the
-     * LogMessage ancestor and concatenating key names with ".".
+     * Builds the log-surgeon qualified rule name for a node by walking up to (but not including)
+     * the LogMessage ancestor and concatenating key names with ".".
      * @param node_id The node ID to start from.
-     * @return The dot-delimited column name.
+     * @return The qualified rule name.
      */
-    [[nodiscard]] auto build_column_name(SchemaNode::id_t node_id) const -> std::string;
+    [[nodiscard]] auto build_ls_rule_name(SchemaNode::id_t node_id) const -> std::string;
 
     /**
      * Finds an ancestor node within a subtree that matches the given type. When multiple matching

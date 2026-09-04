@@ -109,6 +109,8 @@ set(
         ../PackedStreamReader.hpp
         ../ReaderUtils.cpp
         ../ReaderUtils.hpp
+        ../search/Projection.cpp
+        ../search/Projection.hpp
         ../SchemaReader.cpp
         ../SchemaReader.hpp
         ../SchemaTree.cpp

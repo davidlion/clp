@@ -10,6 +10,7 @@
 
 #include <clp_s/archive_constants.hpp>
 #include <clp_s/FileWriter.hpp>
+#include <clp_s/Schema.hpp>
 #include <clp_s/search/ast/Literal.hpp>
 #include <clp_s/ZstdCompressor.hpp>
 
@@ -27,7 +28,6 @@ auto SchemaNode::node_to_literal_type(NodeType type) -> clp_s::search::ast::Lite
             return clp_s::search::ast::LiteralType::FloatT;
         case NodeType::LogMessage:
         case NodeType::ParentRule:
-        case NodeType::LogTypeID:
             return clp_s::search::ast::LiteralType::ClppDecomposeT;
         case NodeType::ClpString:
             return clp_s::search::ast::LiteralType::ClpStringT;
@@ -43,7 +43,6 @@ auto SchemaNode::node_to_literal_type(NodeType type) -> clp_s::search::ast::Lite
         case NodeType::Timestamp:
             return clp_s::search::ast::LiteralType::TimestampT;
         case NodeType::Metadata:
-        case NodeType::LogType:
         case NodeType::Unknown:
         default:
             return clp_s::search::ast::LiteralType::UnknownT;
@@ -70,6 +69,8 @@ auto SchemaTree::add_node(SchemaNode::id_t parent_node_id, NodeType type, std::s
     return node_id;
 }
 
+// `Schema` uses the top bits of each entry to differentiate between MST node (`SchemaNode`) and
+// unordered delimiter entries. Therefore, `SchemaNode::id_t` must not exceed `Schema::cMaxNodeId`.
 auto SchemaTree::add_node(
         SchemaNode::id_t parent_node_id,
         NodeType type,
@@ -81,8 +82,8 @@ auto SchemaTree::add_node(
         return node_it->second;
     }
 
-    if (INT32_MAX < m_nodes.size()) {
-        throw std::overflow_error("SchemaNode allocation reached INT32_MAX.");
+    if (Schema::cMaxNodeId < static_cast<SchemaNode::id_t>(m_nodes.size())) {
+        throw std::overflow_error("SchemaNode allocation reached Schema::cMaxNodeId.");
     }
 
     auto node_id{static_cast<int32_t>(m_nodes.size())};
@@ -158,7 +159,7 @@ auto SchemaTree::store(std::string const& archives_dir, int compression_level) -
     return compressed_size;
 }
 
-auto SchemaTree::build_column_name(int32_t node_id) const -> std::string {
+auto SchemaTree::build_ls_rule_name(int32_t node_id) const -> std::string {
     std::vector<std::string_view> names;
     auto cur_id{node_id};
     while (-1 != cur_id) {

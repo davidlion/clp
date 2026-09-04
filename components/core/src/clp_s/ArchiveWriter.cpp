@@ -13,7 +13,6 @@
 #include <spdlog/spdlog.h>
 #include <ystdlib/error_handling/Result.hpp>
 
-#include <clp/Defs.h>
 #include <clp/EncodedVariableInterpreter.hpp>
 #include <clp_s/archive_constants.hpp>
 #include <clp_s/ColumnWriter.hpp>
@@ -23,6 +22,7 @@
 #include <clp_s/ErrorCode.hpp>
 #include <clp_s/FileWriter.hpp>
 #include <clp_s/ParsedMessage.hpp>
+#include <clp_s/Schema.hpp>
 #include <clp_s/SchemaTree.hpp>
 #include <clp_s/SingleFileArchiveDefs.hpp>
 #include <clp_s/TraceableException.hpp>
@@ -30,6 +30,7 @@
 #include <clpp/ErrorCode.hpp>
 #include <clpp/LogShapeStat.hpp>
 #include <clpp/ParentRuleShapes.hpp>
+#include <clpp/TextShape.hpp>
 
 namespace clp_s {
 void ArchiveWriter::open(ArchiveWriterOption const& option) {
@@ -366,10 +367,7 @@ size_t ArchiveWriter::get_data_size() {
 }
 
 void ArchiveWriter::initialize_schema_writer(SchemaWriter* writer, Schema const& schema) {
-    for (int32_t id : schema) {
-        if (Schema::schema_entry_is_unordered_object(id)) {
-            continue;
-        }
+    schema.get_view().for_each_node_id([&](SchemaNode::id_t id) -> void {
         auto const& node = m_schema_tree.get_node(id);
         switch (node.get_type()) {
             case NodeType::Integer:
@@ -412,13 +410,11 @@ void ArchiveWriter::initialize_schema_writer(SchemaWriter* writer, Schema const&
             case NodeType::Object:
             case NodeType::StructuredArray:
             case NodeType::LogMessage:
-            case NodeType::LogType:
-            case NodeType::LogTypeID:
             case NodeType::ParentRule:
             case NodeType::Unknown:
                 break;
         }
-    }
+    });
 }
 
 std::pair<size_t, size_t> ArchiveWriter::store_tables() {
@@ -556,8 +552,12 @@ auto ArchiveWriter::update_log_shape_dict(clpp::TextShape<std::string> const& lo
         return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Unsupported};
     }
 
-    clpp::log_shape_id_t id{};
-    bool new_entry{m_clpp->log_shape_dict->add_entry(log_shape.view(), id)};
+    clp_s::variable_dictionary_id_t dict_id{};
+    bool new_entry{m_clpp->log_shape_dict->add_entry(log_shape.view(), dict_id)};
+    if (dict_id >= clpp::cMaxLogShapeId) {
+        return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Failure};
+    }
+    auto const id{static_cast<clpp::log_shape_id_t>(dict_id)};
     m_clpp->log_shape_stats.at_or_create(id).increment_count();
     return {id, new_entry};
 }

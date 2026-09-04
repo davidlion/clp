@@ -157,15 +157,8 @@ auto Projection::resolve_columns(SchemaTree const& tree) -> void {
     if (Mode::ReturnAllColumns == m_projection_mode) {
         return;
     }
-    auto is_structural = [](NodeType type) -> bool {
-        return NodeType::LogMessage == type || NodeType::ParentRule == type;
-    };
     for (auto node_id : m_matching_nodes) {
-        auto const& node{tree.get_node(node_id)};
-        if (is_structural(node.get_type())) {
-            continue;
-        }
-        for (auto cur_id{node.get_parent_id()};
+        for (auto cur_id{tree.get_node(node_id).get_parent_id()};
              -1 != cur_id && NodeType::LogMessage != tree.get_node(cur_id).get_type();
              cur_id = tree.get_node(cur_id).get_parent_id())
         {

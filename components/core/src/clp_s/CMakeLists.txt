@@ -379,7 +379,6 @@ set(
         JsonSerializer.hpp
         PackedStreamReader.cpp
         PackedStreamReader.hpp
-         # SchemaReader relies on Projection... need to refactor
         search/Projection.cpp
         search/Projection.hpp
         ReaderUtils.cpp

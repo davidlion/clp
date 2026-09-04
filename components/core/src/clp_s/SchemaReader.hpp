@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -149,6 +150,7 @@ public:
      * @param ordered_schema
      * @param num_messages
      * @param should_marshal_records
+     * @param log_shape_dict
      * @param parent_rule_shapes
      * @param extract_mode
      */
@@ -156,7 +158,7 @@ public:
             std::shared_ptr<SchemaTree> schema_tree,
             std::shared_ptr<search::Projection> projection,
             int32_t schema_id,
-            std::span<int32_t> ordered_schema,
+            std::span<int32_t const> ordered_schema,
             uint64_t num_messages,
             bool should_marshal_records,
             LogShapeDictionaryReader const* log_shape_dict,
@@ -199,20 +201,29 @@ public:
      * Appends an unordered column to the schema reader
      * @param column_reader
      */
-    void append_unordered_column(BaseColumnReader* column_reader);
+    auto append_unordered_column(std::unique_ptr<BaseColumnReader> column_reader) -> void;
 
     size_t get_column_size() { return m_columns.size(); }
 
     /**
      * Marks an unordered object for the purpose of marshalling records.
-     * @param column_reader_start,
-     * @param mst_subtree_root,
-     * @param schema
+     *
+     * Objects rooted at a `ParentRule` node are not stored in the map and must be reached by
+     * walking the schema.
+     * Multiple `ParentRule` objects (of the same parent rule) will share the same MST node ID if
+     * they are directly under the same parent. This means it is not possible to store each match in
+     * the map as they have the same key.
+     *
+     * @param column_reader_start
+     * @param mst_subtree_root
+     * @param sub_schema The object's sub-schema.
+     * @param log_shape_id The object's log shape ID (present for `LogMessage` objects).
      */
     void mark_unordered_object(
             size_t column_reader_start,
             int32_t mst_subtree_root,
-            std::span<int32_t> schema
+            SchemaView sub_schema,
+            std::optional<clpp::log_shape_id_t> log_shape_id
     );
 
     /**
@@ -293,11 +304,8 @@ public:
 
     /**
      * Initializes all internal data structures required to serialize records.
-     * @return A void result on success, or an error code indicating the failure:
-     * - ClppErrorCodeEnum::Corrupt if a `ParentRule` scope in a schema cannot be resolved to a
-     *   schema-tree node, which indicates a corrupt or inconsistent archive.
      */
-    [[nodiscard]] auto initialize_serializer() -> ystdlib::error_handling::Result<void>;
+    void initialize_serializer();
 
     /**
      * Marks a column as timestamp
@@ -315,11 +323,11 @@ public:
     int32_t get_schema_id() const { return m_schema_id; }
 
     /**
-     * @param schema
-     * @return the first column ID found in the given schema, or -1 if the schema contains no
-     * columns
+     * @param sub_schema
+     * @return the first column ID found in the given sub-schema, or -1 if the sub-schema contains
+     * no columns
      */
-    static int32_t get_first_column_in_span(std::span<int32_t> schema);
+    [[nodiscard]] static auto get_first_column_in_span(SchemaView sub_schema) -> SchemaNode::id_t;
 
     /**
      * @return the timestamp found in the row pointed to by m_cur_message
@@ -350,19 +358,29 @@ private:
     };
 
     /**
-     * Records the schema sub-span and starting column index for a single occurrence of a
-     * ParentRule within its parent scope.
+     * Records the sub-schema and starting column index for a single occurrence of a ParentRule
+     * within its parent scope.
      */
     struct ParentRuleOccurrence {
-        std::span<SchemaNode::id_t> sub_span;
-        size_t start_column_reader_idx;
+        SchemaView sub_schema;
+        size_t start_column_reader_idx{0};
     };
 
     /**
-     * Everything collected from a single walk of a schema span during decomposed output
-     * generation:
-     * @var next_column_reader_idx Index into `m_columns` after consuming all span columns.
-     * @var entries The direct leaf entries collected from this span.
+     * A marked unordered object: its starting column index, sub-schema, and log shape ID (present
+     * for `LogMessage` objects).
+     */
+    struct MarkedUnorderedObject {
+        size_t column_reader_start{0};
+        SchemaView sub_schema;
+        std::optional<clpp::log_shape_id_t> log_shape_id;
+    };
+
+    /**
+     * Content collected from a single walk of a sub-schema during decomposed output generation:
+     * @var next_column_reader_idx Index into `m_columns` after consuming all of the sub-schema's
+     * columns.
+     * @var entries The direct leaf entries collected from this sub-schema.
      * @var parent_rule_insertion_order ParentRule node IDs in first-seen order.
      * @var parent_rule_occurrences Maps each ParentRule node ID to all of its occurrences.
      */
@@ -391,13 +409,16 @@ private:
 
     /**
      * Generates a json template for a structured array
-     * @param id
+     * @param array_root_id
      * @param column_start the index of the first reader in m_columns belonging to this array
      * @param schema
      * @return the index of the next reader in m_columns after those consumed by this array
      */
-    size_t
-    generate_structured_array_template(int32_t id, size_t column_start, std::span<int32_t> schema);
+    auto generate_structured_array_template(
+            int32_t array_root_id,
+            size_t column_start,
+            SchemaView sub_schema
+    ) -> size_t;
 
     /**
      * Generates a json template for a structured object
@@ -406,8 +427,8 @@ private:
      * @param schema
      * @return the index of the next reader in m_columns after those consumed by this object
      */
-    size_t
-    generate_structured_object_template(int32_t id, size_t column_start, std::span<int32_t> schema);
+    auto generate_structured_object_template(int32_t id, size_t column_start, SchemaView sub_schema)
+            -> size_t;
 
     /**
      * Generates a JSON template for a LogMessage.
@@ -468,83 +489,38 @@ private:
      * @param parent_rule_column_name The column name of the ParentRule to narrow the shape to,
      * or empty to reconstruct the full LogMessage shape.
      * @param start_column_reader_idx Index in `m_columns`.
-     * @param schema_sub_span The schema sub-span to iterate for column values.
+     * @param sub_schema The sub-schema to iterate for column values.
      * @return The fully-compiled shape.
      */
     [[nodiscard]] auto compile_shape(
             clpp::log_shape_id_t log_shape_id,
             std::string_view parent_rule_column_name,
             size_t start_column_reader_idx,
-            std::span<SchemaNode::id_t> schema_sub_span
+            SchemaView sub_schema
     ) -> CompiledShape;
 
     /**
-     * Aggregates the projection masks of all ParentRule scopes within a schema span into a single
-     * mask. Each ParentRule's mask is merged so the result reflects whether any child has a given
-     * projection mode active.
-     * @param schema The schema span to scan.
-     * @param log_msg_node_id The LogMessage node ID that owns the schema.
-     * @return The aggregated child mask, or an error code indicating the failure:
-     * - ClppErrorCodeEnum::Corrupt if a ParentRule scope cannot be resolved to a schema-tree node.
-     */
-    [[nodiscard]] auto
-    aggregate_child_masks(std::span<SchemaNode::id_t> schema, SchemaNode::id_t log_msg_node_id)
-            -> ystdlib::error_handling::Result<search::Projection::NodeMask>;
-
-    /**
-     * Visits every `ParentRule` unordered-object scope contained in `schema`, recursing into nested
-     * scopes, and invokes `visit` with the resolved schema-tree node ID of the scope and the
-     * sub-span it owns.
+     * Visits every `ParentRule` unordered object contained in `schema`, recursing into nested
+     * objects, and invokes `visit` with the ParentRule's MST node ID and its sub-schema (excluding
+     * the leading `root_node_id` metadata entry).
      *
-     * `ParentRule` scopes are stored as unordered-object delimiters, which carry only a NodeType
-     * and length rather than a node ID, so the owning tree node is recovered by walking up from the
-     * scope's first leaf to the nearest `ParentRule` ancestor of `tree_root`.
-     *
-     * @param schema The schema span to walk.
-     * @param tree_root The schema-tree node owning `schema` (the LogMessage for the top-level call,
-     *     the owning `ParentRule` for nested calls).
-     * @param visit Invoked as `visit(parent_rule_id, sub_span)` for each `ParentRule` scope, in
-     *     depth-first schema order.
-     * @tparam Visit Callable accepting `(SchemaNode::id_t, std::span<SchemaNode::id_t>)`.
-     * @return A void result on success, or an error code indicating the failure:
-     * - ClppErrorCodeEnum::Corrupt if a `ParentRule` unordered-object scope cannot be resolved to
-     *   a schema-tree node (the scope's first leaf has no matching `ParentRule` ancestor of
-     *   `tree_root`), which indicates a corrupt or inconsistent archive.
+     * @param schema
+     * @param visit Invoked for each `ParentRule` scope, in depth-first schema order.
+     * @tparam Visit Callable accepting `(SchemaNode::id_t parent_rule_id, SchemaView sub_schema)`.
      */
     template <typename Visit>
-    auto for_each_parent_rule_scope(
-            std::span<SchemaNode::id_t> schema,
-            SchemaNode::id_t tree_root,
-            Visit&& visit
-    ) -> ystdlib::error_handling::Result<void> {
-        for (size_t i{0}; i < schema.size(); ++i) {
-            auto const entry{schema[i]};
-            if (false == Schema::schema_entry_is_unordered_object(entry)) {
-                continue;
-            }
-            auto const length{Schema::get_unordered_object_length(entry)};
-            if (NodeType::ParentRule != Schema::get_unordered_object_type(entry)) {
-                i += length;
-                continue;
-            }
-            auto const sub_span{schema.subspan(i + 1, length)};
-            auto const parent_rule_id{m_global_schema_tree->find_matching_subtree_root_in_subtree(
-                    tree_root,
-                    get_first_column_in_span(sub_span),
-                    NodeType::ParentRule
-            )};
-            if (-1 == parent_rule_id) {
-                return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Corrupt};
-            }
-            visit(parent_rule_id, sub_span);
-            if (auto const recurse{for_each_parent_rule_scope(sub_span, parent_rule_id, visit)};
-                recurse.has_error())
-            {
-                return recurse.error();
-            }
-            i += length;
-        }
-        return ystdlib::error_handling::success();
+    auto for_each_parent_rule_scope(SchemaView schema, Visit const& visit) -> void {
+        static_cast<void>(schema.visit_entries(
+                [](SchemaNode::id_t) -> bool { return false; },
+                [&](UnorderedObject const& obj) -> bool {
+                    if (NodeType::ParentRule != obj.type) {
+                        return false;
+                    }
+                    visit(obj.root_node_id.value(), obj.sub_schema);
+                    for_each_parent_rule_scope(obj.sub_schema, visit);
+                    return false;
+                }
+        ));
     }
 
     /**
@@ -578,35 +554,33 @@ private:
             -> ystdlib::error_handling::Result<void>;
 
     /**
-     * Walks a schema span, collecting direct leaf entries and ParentRule occurrences (grouped by
+     * Walks a sub-schema, collecting direct leaf entries and ParentRule occurrences (grouped by
      * parent-rule node ID, with insertion order preserved), while advancing the column index past
      * all column-consuming entries including those inside nested scopes.
-     * @param schema The schema span to walk.
+     * @param schema The sub-schema to walk.
      * @param scope_node_id The node ID of the owning scope (LogMessage or ParentRule).
-     * @param column_idx The index of this scope's first column reader in `m_columns`.
+     * @param start_column_reader_idx The index of this scope's first column reader in `m_columns`.
      * @param ancestor_decomposed Whether an ancestor scope has Decomposed projection active,
-     *     causing all direct leaves to be collected regardless of individual projection checks.
-     * @return The collected span contents, or an error code indicating the failure:
-     * - ClppErrorCodeEnum::Corrupt if a ParentRule scope cannot be resolved to a schema-tree node.
+     * causing all direct leaves to be collected regardless of individual projection checks.
+     * @return The collected scope contents.
      */
     [[nodiscard]] auto collect_scope_entries(
-            std::span<SchemaNode::id_t> schema,
+            SchemaView schema,
             SchemaNode::id_t scope_node_id,
-            size_t column_idx,
+            size_t start_column_reader_idx,
             bool ancestor_decomposed
-    ) -> ystdlib::error_handling::Result<SchemaSpanContents>;
+    ) -> SchemaSpanContents;
 
     /**
      * Emits ParentRule arrays from the grouped occurrences in a `SchemaSpanContents`. For each
      * ParentRule group, emits a JSON array with one object per occurrence. Each object contains any
      * projected fields.
-     * @param scope The collected span contents.
+     * @param scope The collected scope contents.
      * @param log_shape_id
      * @param ancestor_decomposed Whether an ancestor scope has Decomposed projection active.
      * @return A void result on success, or an error code indicating the failure:
-     * - ClppErrorCodeEnum::Failure if the shape dictionary is not available.
-     * - ClppErrorCodeEnum::Corrupt if a ParentRule scope cannot be resolved to a schema-tree node.
-     * - ClppErrorCodeEnum::Unsupported if an unsupported column type is encountered.
+     * - Forwards `emit_parent_rule_shape_substring`'s return values.
+     * - Forwards `emit_decomposed_scope`'s return values.
      */
     [[nodiscard]] auto emit_parent_rule_arrays(
             SchemaSpanContents const& scope,
@@ -615,23 +589,23 @@ private:
     ) -> ystdlib::error_handling::Result<void>;
 
     /**
-     * Emits the decomposed content of a schema span (LogMessage or ParentRule scope) as direct
-     * leaf arrays and nested ParentRule objects. The ParentRule objects contain their direct leaf
-     * arrays and other nest ParentRule ojbects.
-     * @param schema The schema span to walk.
+     * Emits the decomposed content of a LogMessage or ParentRule sub-schema as direct leaf arrays
+     * and nested ParentRule objects. The ParentRule objects contain their direct leaf arrays and
+     * other nested ParentRule objects.
+     * @param schema The sub-schema to walk.
      * @param scope_node_id The node ID of the owning scope (LogMessage or ParentRule).
      * @param column_idx The index of this scope's first column reader in `m_columns`.
      * @param log_shape_id
      * @param ancestor_decomposed Whether an ancestor scope has Decomposed projection active,
-     *     causing all leaves and child ParentRules to be emitted regardless of individual
-     *     projection checks.
+     * causing all leaves and child ParentRules to be emitted regardless of individual projection
+     * checks.
      * @return The column index past the last consumed column in this scope, or an error code
-     *     indicating the failure:
-     * - ClppErrorCodeEnum::Corrupt if a ParentRule scope cannot be resolved to a schema-tree node.
-     * - ClppErrorCodeEnum::Unsupported if an unsupported column type is encountered.
+     * indicating the failure:
+     * - Forwards `emit_grouped_leaf_entries`'s return values.
+     * - Forwards `emit_parent_rule_arrays`'s return values.
      */
     [[nodiscard]] auto emit_decomposed_scope(
-            std::span<SchemaNode::id_t> schema,
+            SchemaView schema,
             SchemaNode::id_t scope_node_id,
             size_t column_idx,
             clpp::log_shape_id_t log_shape_id,
@@ -660,7 +634,7 @@ private:
     int32_t m_schema_id;
     uint64_t m_num_messages;
     uint64_t m_cur_message;
-    std::span<int32_t> m_ordered_schema;
+    std::span<int32_t const> m_ordered_schema;
 
     std::unordered_map<int32_t, BaseColumnReader*> m_column_map;
     std::vector<BaseColumnReader*> m_columns;
@@ -681,10 +655,9 @@ private:
     bool m_serializer_initialized{false};
     std::shared_ptr<search::Projection> m_projection;
 
-    std::map<int32_t, std::pair<size_t, std::span<int32_t>>> m_global_id_to_unordered_object;
+    // Keyed by the object root's schema-tree node ID.
+    std::map<int32_t, MarkedUnorderedObject> m_global_id_to_unordered_object;
     std::vector<CompiledShape> m_reconstruction_targets;
-    // TODO clpp: the archive reader owns the schema reader so this is safe, but the ownership
-    // between the readers is problematic.
     LogShapeDictionaryReader const* m_log_shape_dict;
     clpp::ParentRuleShapesArray const* m_parent_rule_shapes;
     bool m_extract_mode{false};

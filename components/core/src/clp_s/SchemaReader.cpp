@@ -1,16 +1,15 @@
 #include "SchemaReader.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
-#include <span>
 #include <stack>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -34,42 +33,31 @@ namespace clp_s {
 namespace {
 /**
  * Builds a map from column name to the list of reader indices (in schema order) for all
- * column-consuming (leaf rule) nodes in the given schema sub-span.
+ * column-consuming (leaf rule) nodes in the given sub-schema.
  *
- * @param schema_sub_span The schema sub-span to scan.
+ * @param sub_schema The sub-schema to scan.
  * @param tree The global schema tree.
  * @param start_column_reader_idx The starting index in `m_columns` for the first column in the
- * sub-span.
+ * sub-schema.
  * @return A map from column name to reader indices, and the next reader index after the last
  * consumed column.
  */
 [[nodiscard]] auto build_name_to_reader_indices(
-        std::span<SchemaNode::id_t> schema_sub_span,
+        SchemaView sub_schema,
         SchemaTree const& tree,
         size_t start_column_reader_idx
 ) -> std::pair<std::unordered_map<std::string, std::vector<size_t>>, size_t>;
 
 /**
- * Counts the number of column-consuming entries in a schema span, including entries within
+ * Counts the number of column-consuming entries in a sub-schema, including entries within
  * nested unordered-object scopes.
- * @param schema The schema span to scan.
+ * @param schema The sub-schema to scan.
  * @param tree The schema tree (used to resolve node types for non-delimiter entries).
  * @return The number of column-consuming entries.
  */
-[[nodiscard]] auto
-count_column_consuming_entries(std::span<SchemaNode::id_t> schema, SchemaTree const& tree)
+[[nodiscard]] auto count_column_consuming_entries(SchemaView schema, SchemaTree const& tree)
         -> size_t;
 
-/**
- * Finds the LogTypeID node in a schema and parses its dictionary ID.
- * @param schema
- * @param tree
- * @return The log shape ID.
- * @return std::nullopt if the log shape is not found.
- */
-[[nodiscard]] auto
-find_log_type_id_in_schema(std::span<SchemaNode::id_t> schema, SchemaTree const& tree)
-        -> std::optional<clpp::log_shape_id_t>;
 /**
  * @param type
  * @return true if the given node type corresponds to a scalar column that consumes a column
@@ -78,78 +66,39 @@ find_log_type_id_in_schema(std::span<SchemaNode::id_t> schema, SchemaTree const&
 [[nodiscard]] auto node_type_consumes_column(NodeType type) -> bool;
 
 [[nodiscard]] auto build_name_to_reader_indices(
-        std::span<SchemaNode::id_t> schema_sub_span,
+        SchemaView sub_schema,
         SchemaTree const& tree,
         size_t start_column_reader_idx
 ) -> std::pair<std::unordered_map<std::string, std::vector<size_t>>, size_t> {
     std::unordered_map<std::string, std::vector<size_t>> name_to_reader_indices;
     size_t column_reader_idx{start_column_reader_idx};
-    for (auto global_column_id : schema_sub_span) {
-        if (Schema::schema_entry_is_unordered_object(global_column_id)) {
-            continue;
-        }
+    sub_schema.for_each_node_id([&](SchemaNode::id_t global_column_id) -> void {
         auto const& node{tree.get_node(global_column_id)};
         if (false == node_type_consumes_column(node.get_type())) {
-            continue;
+            return;
         }
-        name_to_reader_indices[tree.build_column_name(global_column_id)].push_back(
+        name_to_reader_indices[tree.build_ls_rule_name(global_column_id)].push_back(
                 column_reader_idx
         );
         ++column_reader_idx;
-    }
+    });
     return {std::move(name_to_reader_indices), column_reader_idx};
 }
 
-[[nodiscard]] auto
-count_column_consuming_entries(std::span<SchemaNode::id_t> schema, SchemaTree const& tree)
+[[nodiscard]] auto count_column_consuming_entries(SchemaView schema, SchemaTree const& tree)
         -> size_t {
     size_t count{0};
-    for (size_t i{0}; i < schema.size(); ++i) {
-        auto const entry{schema[i]};
-        if (Schema::schema_entry_is_unordered_object(entry)) {
-            auto const length{Schema::get_unordered_object_length(entry)};
-            count += count_column_consuming_entries(schema.subspan(i + 1, length), tree);
-            i += length;
-            continue;
-        }
-        auto const& node{tree.get_node(entry)};
-        if (node_type_consumes_column(node.get_type())) {
+    schema.for_each_node_id([&](SchemaNode::id_t entry) -> void {
+        if (node_type_consumes_column(tree.get_node(entry).get_type())) {
             ++count;
         }
-    }
+    });
     return count;
-}
-
-[[nodiscard]] auto
-find_log_type_id_in_schema(std::span<SchemaNode::id_t> schema, SchemaTree const& tree)
-        -> std::optional<clpp::log_shape_id_t> {
-    for (auto global_column_id : schema) {
-        if (Schema::schema_entry_is_unordered_object(global_column_id)) {
-            continue;
-        }
-        auto const& node = tree.get_node(global_column_id);
-        if (NodeType::LogTypeID == node.get_type()) {
-            auto const& key_name = node.get_key_name();
-            clpp::log_shape_id_t log_shape_id{};
-            auto [ptr, ec] = std::from_chars(
-                    key_name.data(),
-                    key_name.data() + key_name.size(),
-                    log_shape_id
-            );
-            if (std::errc() == ec && ptr == key_name.data() + key_name.size()) {
-                return log_shape_id;
-            }
-            break;
-        }
-    }
-    return std::nullopt;
 }
 
 [[nodiscard]] auto node_type_consumes_column(NodeType type) -> bool {
     switch (type) {
-        case NodeType::LogTypeID:
         case NodeType::LogMessage:
-        case NodeType::LogType:
         case NodeType::ParentRule: {
             return false;
         }
@@ -165,8 +114,9 @@ void SchemaReader::append_column(BaseColumnReader* column_reader) {
     m_columns.push_back(column_reader);
 }
 
-void SchemaReader::append_unordered_column(BaseColumnReader* column_reader) {
-    m_columns.push_back(column_reader);
+auto SchemaReader::append_unordered_column(std::unique_ptr<BaseColumnReader> column_reader)
+        -> void {
+    m_columns.push_back(column_reader.release());
 }
 
 void SchemaReader::mark_column_as_timestamp(BaseColumnReader* column_reader) {
@@ -381,11 +331,7 @@ bool SchemaReader::get_next_message(std::string& message) {
     }
 
     if (false == m_serializer_initialized) {
-        if (auto const result{initialize_serializer()}; result.has_error()) {
-            throw std::runtime_error(
-                    "initialize_serializer failed with: " + result.error().message()
-            );
-        }
+        initialize_serializer();
     }
     message = generate_json_string(m_cur_message);
 
@@ -408,11 +354,7 @@ bool SchemaReader::get_next_message(std::string& message, FilterClass& filter) {
 
     if (m_should_marshal_records) {
         if (false == m_serializer_initialized) {
-            if (auto const result{initialize_serializer()}; result.has_error()) {
-                throw std::runtime_error(
-                        "initialize_serializer failed with: " + result.error().message()
-                );
-            }
+            initialize_serializer();
         }
         message = generate_json_string(m_cur_message);
 
@@ -436,11 +378,7 @@ bool SchemaReader::get_next_message_with_metadata(
 
     if (m_should_marshal_records) {
         if (false == m_serializer_initialized) {
-            if (auto const result{initialize_serializer()}; result.has_error()) {
-                throw std::runtime_error(
-                        "initialize_serializer failed with: " + result.error().message()
-                );
-            }
+            initialize_serializer();
         }
         message = generate_json_string(m_cur_message);
 
@@ -474,11 +412,7 @@ bool SchemaReader::get_next_message_with_metadata(
 
     if (m_should_marshal_records) {
         if (false == m_serializer_initialized) {
-            if (auto const result{initialize_serializer()}; result.has_error()) {
-                throw std::runtime_error(
-                        "initialize_serializer failed with: " + result.error().message()
-                );
-            }
+            initialize_serializer();
         }
         message = generate_json_string(m_cur_message);
 
@@ -530,21 +464,43 @@ void SchemaReader::generate_local_tree(int32_t global_id) {
 void SchemaReader::mark_unordered_object(
         size_t column_reader_start,
         int32_t mst_subtree_root,
-        std::span<int32_t> schema
+        SchemaView sub_schema,
+        std::optional<clpp::log_shape_id_t> log_shape_id
 ) {
+    if (NodeType::ParentRule == m_global_schema_tree->get_node(mst_subtree_root).get_type()) {
+        return;
+    }
     m_global_id_to_unordered_object.emplace(
             mst_subtree_root,
-            std::make_pair(column_reader_start, schema)
+            MarkedUnorderedObject{
+                    .column_reader_start = column_reader_start,
+                    .sub_schema = sub_schema,
+                    .log_shape_id = log_shape_id
+            }
     );
 }
 
-int32_t SchemaReader::get_first_column_in_span(std::span<int32_t> schema) {
-    for (int32_t column_id : schema) {
-        if (false == Schema::schema_entry_is_unordered_object(column_id)) {
-            return column_id;
-        }
-    }
-    return -1;
+auto SchemaReader::get_first_column_in_span(SchemaView sub_schema) -> SchemaNode::id_t {
+    SchemaNode::id_t first_column_id{-1};
+    static_cast<void>(sub_schema.visit_entries(
+            [&](SchemaNode::id_t node_id) -> bool {
+                first_column_id = node_id;
+                return true;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                if (obj.root_node_id.has_value()) {
+                    first_column_id = obj.root_node_id.value();
+                    return true;
+                }
+                auto const id{get_first_column_in_span(obj.sub_schema)};
+                if (-1 == id) {
+                    return false;
+                }
+                first_column_id = id;
+                return true;
+            }
+    ));
+    return first_column_id;
 }
 
 auto SchemaReader::is_node_projected(SchemaNode::id_t node_id) -> bool {
@@ -623,218 +579,217 @@ void SchemaReader::find_intersection_and_fix_brackets(
     path_to_intersection.clear();
 }
 
-size_t SchemaReader::generate_structured_array_template(
-        int32_t array_root,
+auto SchemaReader::generate_structured_array_template(
+        int32_t array_root_id,
         size_t column_start,
-        std::span<int32_t> schema
-) {
+        SchemaView schema
+) -> size_t {
     size_t column_idx = column_start;
     std::vector<int32_t> path_to_intersection;
-    int32_t depth = m_global_schema_tree->get_node(array_root).get_depth();
+    int32_t depth = m_global_schema_tree->get_node(array_root_id).get_depth();
 
-    for (size_t i = 0; i < schema.size(); ++i) {
-        int32_t global_column_id = schema[i];
-        if (Schema::schema_entry_is_unordered_object(global_column_id)) {
-            auto type = Schema::get_unordered_object_type(global_column_id);
-            size_t length = Schema::get_unordered_object_length(global_column_id);
-            auto sub_object_schema = schema.subspan(i + 1, length);
-            if (NodeType::StructuredArray == type) {
-                int32_t sub_array_root
-                        = m_global_schema_tree->find_matching_subtree_root_in_subtree(
-                                array_root,
-                                get_first_column_in_span(sub_object_schema),
-                                NodeType::StructuredArray
+    static_cast<void>(schema.visit_entries(
+            [&](SchemaNode::id_t global_column_id) -> bool {
+                auto const& node = m_global_schema_tree->get_node(global_column_id);
+                switch (node.get_type()) {
+                    case NodeType::Object: {
+                        find_intersection_and_fix_brackets(
+                                array_root_id,
+                                global_column_id,
+                                path_to_intersection
                         );
-                m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedArray);
-                column_idx = generate_structured_array_template(
-                        sub_array_root,
-                        column_idx,
-                        sub_object_schema
-                );
-                m_json_serializer.add_op(JsonSerializer::Op::EndArray);
-            } else if (NodeType::Object == type) {
-                int32_t object_root = m_global_schema_tree->find_matching_subtree_root_in_subtree(
-                        array_root,
-                        get_first_column_in_span(sub_object_schema),
-                        NodeType::Object
-                );
-                m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedObject);
-                column_idx = generate_structured_object_template(
-                        object_root,
-                        column_idx,
-                        sub_object_schema
-                );
-                m_json_serializer.add_op(JsonSerializer::Op::EndObject);
-            }
-            i += length;
-        } else {
-            auto const& node = m_global_schema_tree->get_node(global_column_id);
-            switch (node.get_type()) {
-                case NodeType::Object: {
-                    find_intersection_and_fix_brackets(
-                            array_root,
-                            global_column_id,
-                            path_to_intersection
-                    );
-                    for (int j = 0; j < (node.get_depth() - depth); ++j) {
-                        m_json_serializer.add_op(JsonSerializer::Op::EndObject);
+                        for (int j = 0; j < (node.get_depth() - depth); ++j) {
+                            m_json_serializer.add_op(JsonSerializer::Op::EndObject);
+                        }
+                        break;
                     }
-                    break;
+                    case NodeType::StructuredArray: {
+                        m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedArray);
+                        m_json_serializer.add_op(JsonSerializer::Op::EndArray);
+                        break;
+                    }
+                    case NodeType::DeltaInteger:
+                    case NodeType::Integer: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddIntValue);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::Float: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddFloatValue);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::FormattedFloat:
+                    case NodeType::DictionaryFloat: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddFormattedFloatValue);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::Boolean: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddBoolValue);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::ClpString:
+                    case NodeType::VarString: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddStringValue);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::NullValue: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddNullValue);
+                        break;
+                    }
+                    case NodeType::DeprecatedDateString:
+                    case NodeType::UnstructuredArray:
+                    case NodeType::Metadata:
+                    case NodeType::LogMessage:
+                    case NodeType::ParentRule:
+                    case NodeType::Timestamp:
+                    case NodeType::Unknown:
+                        break;
                 }
-                case NodeType::StructuredArray: {
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                if (NodeType::StructuredArray == obj.type) {
+                    auto const sub_array_root{
+                            m_global_schema_tree->find_matching_subtree_root_in_subtree(
+                                    array_root_id,
+                                    get_first_column_in_span(obj.sub_schema),
+                                    NodeType::StructuredArray
+                            )
+                    };
                     m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedArray);
+                    column_idx = generate_structured_array_template(
+                            sub_array_root,
+                            column_idx,
+                            obj.sub_schema
+                    );
                     m_json_serializer.add_op(JsonSerializer::Op::EndArray);
-                    break;
+                } else if (NodeType::Object == obj.type) {
+                    auto const object_root{
+                            m_global_schema_tree->find_matching_subtree_root_in_subtree(
+                                    array_root_id,
+                                    get_first_column_in_span(obj.sub_schema),
+                                    NodeType::Object
+                            )
+                    };
+                    m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedObject);
+                    column_idx = generate_structured_object_template(
+                            object_root,
+                            column_idx,
+                            obj.sub_schema
+                    );
+                    m_json_serializer.add_op(JsonSerializer::Op::EndObject);
                 }
-                case NodeType::DeltaInteger:
-                case NodeType::Integer: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddIntValue);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::Float: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddFloatValue);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::FormattedFloat:
-                case NodeType::DictionaryFloat: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddFormattedFloatValue);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::Boolean: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddBoolValue);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::ClpString:
-                case NodeType::VarString: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddStringValue);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::NullValue: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddNullValue);
-                    break;
-                }
-                case NodeType::DeprecatedDateString:
-                case NodeType::UnstructuredArray:
-                case NodeType::Metadata:
-                case NodeType::LogMessage:
-                case NodeType::LogType:
-                case NodeType::LogTypeID:
-                case NodeType::ParentRule:
-                case NodeType::Timestamp:
-                case NodeType::Unknown:
-                    break;
+                return false;
             }
-        }
-    }
+    ));
     return column_idx;
 }
 
-size_t SchemaReader::generate_structured_object_template(
+auto SchemaReader::generate_structured_object_template(
         int32_t object_root,
         size_t column_start,
-        std::span<int32_t> schema
-) {
+        SchemaView schema
+) -> size_t {
     int32_t root = object_root;
     size_t column_idx = column_start;
     std::vector<int32_t> path_to_intersection;
 
-    for (size_t i = 0; i < schema.size(); ++i) {
-        int32_t global_column_id = schema[i];
-        if (Schema::schema_entry_is_unordered_object(global_column_id)) {
-            // It should only be possible to encounter arrays inside of structured objects
-            size_t array_length = Schema::get_unordered_object_length(global_column_id);
-            auto array_schema = schema.subspan(i + 1, array_length);
-            // we can guarantee that the last array we hit on the path to object root must be the
-            // right one because otherwise we'd be inside the structured array generator
-            int32_t array_root = m_global_schema_tree->find_matching_subtree_root_in_subtree(
-                    object_root,
-                    get_first_column_in_span(array_schema),
-                    NodeType::StructuredArray
-            );
+    static_cast<void>(schema.visit_entries(
+            [&](SchemaNode::id_t global_column_id) -> bool {
+                auto const& node = m_global_schema_tree->get_node(global_column_id);
+                int32_t next_root = node.get_parent_id();
+                find_intersection_and_fix_brackets(root, next_root, path_to_intersection);
+                root = next_root;
+                switch (node.get_type()) {
+                    case NodeType::Object: {
+                        m_json_serializer.add_op(JsonSerializer::Op::BeginObject);
+                        m_json_serializer.add_special_key(node.get_key_name());
+                        m_json_serializer.add_op(JsonSerializer::Op::EndObject);
+                        break;
+                    }
+                    case NodeType::StructuredArray: {
+                        m_json_serializer.add_op(JsonSerializer::Op::BeginArray);
+                        m_json_serializer.add_special_key(node.get_key_name());
+                        m_json_serializer.add_op(JsonSerializer::Op::EndArray);
+                        break;
+                    }
+                    case NodeType::DeltaInteger:
+                    case NodeType::Integer: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddIntField);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::Float: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddFloatField);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::FormattedFloat:
+                    case NodeType::DictionaryFloat: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddFormattedFloatField);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::Boolean: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddBoolField);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::ClpString:
+                    case NodeType::VarString: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddStringField);
+                        m_reordered_columns.push_back(m_columns[column_idx++]);
+                        break;
+                    }
+                    case NodeType::NullValue: {
+                        m_json_serializer.add_op(JsonSerializer::Op::AddNullField);
+                        m_json_serializer.add_special_key(node.get_key_name());
+                        break;
+                    }
+                    case NodeType::DeprecatedDateString:
+                    case NodeType::UnstructuredArray:
+                    case NodeType::Metadata:
+                    case NodeType::LogMessage:
+                    case NodeType::ParentRule:
+                    case NodeType::Timestamp:
+                    case NodeType::Unknown:
+                        break;
+                }
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                // It should only be possible to encounter arrays inside of structured objects
+                // we can guarantee that the last array we hit on the path to object root must be
+                // the right one because otherwise we'd be inside the structured array generator
+                int32_t array_root = m_global_schema_tree->find_matching_subtree_root_in_subtree(
+                        object_root,
+                        get_first_column_in_span(obj.sub_schema),
+                        NodeType::StructuredArray
+                );
 
-            find_intersection_and_fix_brackets(root, array_root, path_to_intersection);
-            column_idx = generate_structured_array_template(array_root, column_idx, array_schema);
-            m_json_serializer.add_op(JsonSerializer::Op::EndArray);
-            i += array_length;
-            // root is parent of the array object since we close the array bracket above
-            auto const& node = m_global_schema_tree->get_node(array_root);
-            root = node.get_parent_id();
-        } else {
-            auto const& node = m_global_schema_tree->get_node(global_column_id);
-            int32_t next_root = node.get_parent_id();
-            find_intersection_and_fix_brackets(root, next_root, path_to_intersection);
-            root = next_root;
-            switch (node.get_type()) {
-                case NodeType::Object: {
-                    m_json_serializer.add_op(JsonSerializer::Op::BeginObject);
-                    m_json_serializer.add_special_key(node.get_key_name());
-                    m_json_serializer.add_op(JsonSerializer::Op::EndObject);
-                    break;
-                }
-                case NodeType::StructuredArray: {
-                    m_json_serializer.add_op(JsonSerializer::Op::BeginArray);
-                    m_json_serializer.add_special_key(node.get_key_name());
-                    m_json_serializer.add_op(JsonSerializer::Op::EndArray);
-                    break;
-                }
-                case NodeType::DeltaInteger:
-                case NodeType::Integer: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddIntField);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::Float: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddFloatField);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::FormattedFloat:
-                case NodeType::DictionaryFloat: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddFormattedFloatField);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::Boolean: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddBoolField);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::ClpString:
-                case NodeType::VarString: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddStringField);
-                    m_reordered_columns.push_back(m_columns[column_idx++]);
-                    break;
-                }
-                case NodeType::NullValue: {
-                    m_json_serializer.add_op(JsonSerializer::Op::AddNullField);
-                    m_json_serializer.add_special_key(node.get_key_name());
-                    break;
-                }
-                case NodeType::DeprecatedDateString:
-                case NodeType::UnstructuredArray:
-                case NodeType::Metadata:
-                case NodeType::LogMessage:
-                case NodeType::LogType:
-                case NodeType::LogTypeID:
-                case NodeType::ParentRule:
-                case NodeType::Timestamp:
-                case NodeType::Unknown:
-                    break;
+                find_intersection_and_fix_brackets(root, array_root, path_to_intersection);
+                column_idx = generate_structured_array_template(
+                        array_root,
+                        column_idx,
+                        obj.sub_schema
+                );
+                m_json_serializer.add_op(JsonSerializer::Op::EndArray);
+                // root is parent of the array object since we close the array bracket above
+                root = m_global_schema_tree->get_node(array_root).get_parent_id();
+                return false;
             }
-        }
-    }
+    ));
     find_intersection_and_fix_brackets(root, object_root, path_to_intersection);
     return column_idx;
 }
 
-auto SchemaReader::initialize_serializer() -> ystdlib::error_handling::Result<void> {
+void SchemaReader::initialize_serializer() {
     if (m_serializer_initialized) {
-        return ystdlib::error_handling::success();
+        return;
     }
 
     m_serializer_initialized = true;
@@ -849,33 +804,30 @@ auto SchemaReader::initialize_serializer() -> ystdlib::error_handling::Result<vo
         auto const root_id{entry.first};
         auto const& root_node{m_global_schema_tree->get_node(root_id)};
         if (NodeType::LogMessage == root_node.get_type()) {
-            auto const& schema{entry.second.second};
+            auto const& sub_schema{entry.second.sub_schema};
             bool need_log_message{false};
             if (m_projection->matches_node(root_id)) {
                 generate_local_tree(root_id);
                 need_log_message = true;
             }
-            for (auto const child_id : schema) {
-                if (Schema::schema_entry_is_unordered_object(child_id)) {
-                    continue;
-                }
+            sub_schema.for_each_node_id([&](SchemaNode::id_t child_id) -> void {
                 if (is_node_projected(child_id)) {
                     generate_local_tree(child_id);
                     need_log_message = true;
                 }
-            }
+            });
             // Shape projection of a ParentRule is exclusive to the node itself, so
             // is_node_projected on its leaves does not flag the LogMessage; detect projected
             // ParentRule scopes directly and ensure the LogMessage (and the scope's tree path) is
             // materialized.
-            YSTDLIB_ERROR_HANDLING_TRYV(
-                    for_each_parent_rule_scope(schema, root_id, [&](auto parent_rule_id, auto) {
-                        if (m_projection->matches_node(parent_rule_id)) {
-                            generate_local_tree(parent_rule_id);
-                            need_log_message = true;
-                        }
-                    })
-            );
+            for_each_parent_rule_scope(sub_schema, [&](auto parent_rule_id, auto) -> void {
+                if (m_projection->matches_node(parent_rule_id)
+                    || m_projection->has_projected_descendant(parent_rule_id))
+                {
+                    generate_local_tree(parent_rule_id);
+                    need_log_message = true;
+                }
+            });
             if (need_log_message && false == m_projection->matches_node(root_id)) {
                 generate_local_tree(root_id);
             }
@@ -893,8 +845,6 @@ auto SchemaReader::initialize_serializer() -> ystdlib::error_handling::Result<vo
     {
         generate_json_template(subtree_root);
     }
-
-    return ystdlib::error_handling::success();
 }
 
 void SchemaReader::generate_json_template(int32_t id) {
@@ -923,12 +873,11 @@ void SchemaReader::generate_json_template(int32_t id) {
                 m_json_serializer.add_special_key(key);
                 auto structured_it = m_global_id_to_unordered_object.find(child_global_id);
                 if (m_global_id_to_unordered_object.end() != structured_it) {
-                    size_t column_start = structured_it->second.first;
-                    std::span<int32_t> structured_schema = structured_it->second.second;
+                    auto const& record{structured_it->second};
                     generate_structured_array_template(
                             child_global_id,
-                            column_start,
-                            structured_schema
+                            record.column_reader_start,
+                            record.sub_schema
                     );
                 }
                 m_json_serializer.add_op(JsonSerializer::Op::EndArray);
@@ -984,8 +933,6 @@ void SchemaReader::generate_json_template(int32_t id) {
                 break;
             }
             case NodeType::Metadata:
-            case NodeType::LogType:
-            case NodeType::LogTypeID:
             case NodeType::ParentRule:
             case NodeType::Unknown: {
                 break;
@@ -1026,73 +973,62 @@ auto SchemaReader::emit_log_shape(clpp::log_shape_id_t log_shape_id)
 }
 
 auto SchemaReader::collect_scope_entries(
-        std::span<SchemaNode::id_t> schema,
+        SchemaView schema,
         SchemaNode::id_t scope_node_id,
-        size_t column_reader_idx,
+        size_t start_column_reader_idx,
         bool ancestor_decomposed
-) -> ystdlib::error_handling::Result<SchemaSpanContents> {
+) -> SchemaSpanContents {
     SchemaSpanContents scope;
-    scope.next_column_reader_idx = column_reader_idx;
-
-    for (size_t i{0}; i < schema.size(); ++i) {
-        auto const cur_node_id{schema[i]};
-        if (Schema::schema_entry_is_unordered_object(cur_node_id)) {
-            auto const length{Schema::get_unordered_object_length(cur_node_id)};
-            auto const sub_span{schema.subspan(i + 1, length)};
-            if (NodeType::ParentRule == Schema::get_unordered_object_type(cur_node_id)) {
-                auto const parent_rule_id{
-                        m_global_schema_tree->find_matching_subtree_root_in_subtree(
-                                scope_node_id,
-                                get_first_column_in_span(sub_span),
-                                NodeType::ParentRule
-                        )
-                };
-                if (-1 == parent_rule_id) {
-                    return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Corrupt};
+    size_t column_reader_idx{start_column_reader_idx};
+    static_cast<void>(schema.visit_entries(
+            [&](SchemaNode::id_t cur_node_id) -> bool {
+                auto const& node{m_global_schema_tree->get_node(cur_node_id)};
+                if (node_type_consumes_column(node.get_type())) {
+                    bool const should_emit{
+                            ancestor_decomposed
+                            || (m_projection && false == m_projection->is_return_all_columns()
+                                && m_projection->matches_node(cur_node_id))
+                            || (m_projection
+                                && m_projection->is_projected_as(
+                                        scope_node_id,
+                                        search::Projection::NodeMask::Mode::Decompose
+                                ))
+                    };
+                    if (should_emit) {
+                        scope.entries.push_back(
+                                DecompositionTarget{
+                                        .node_id = cur_node_id,
+                                        .reader_idx = column_reader_idx,
+                                        .name = node.get_key_name(),
+                                        .type = node.get_type()
+                                }
+                        );
+                    }
+                    ++column_reader_idx;
                 }
-                auto const [it, inserted]{
-                        scope.parent_rule_occurrences.try_emplace(parent_rule_id)
-                };
-                if (inserted) {
-                    scope.parent_rule_insertion_order.push_back(parent_rule_id);
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                if (NodeType::ParentRule == obj.type) {
+                    auto const parent_rule_id{obj.root_node_id.value()};
+                    auto const [it, inserted]{
+                            scope.parent_rule_occurrences.try_emplace(parent_rule_id)
+                    };
+                    if (inserted) {
+                        scope.parent_rule_insertion_order.push_back(parent_rule_id);
+                    }
+                    it->second.push_back(
+                            ParentRuleOccurrence{
+                                    .sub_schema = obj.sub_schema,
+                                    .start_column_reader_idx = column_reader_idx
+                            }
+                    );
                 }
-                it->second.push_back(
-                        ParentRuleOccurrence{
-                                .sub_span = sub_span,
-                                .start_column_reader_idx = column_reader_idx
-                        }
-                );
+                column_reader_idx
+                        += count_column_consuming_entries(obj.sub_schema, *m_global_schema_tree);
+                return false;
             }
-            column_reader_idx += count_column_consuming_entries(sub_span, *m_global_schema_tree);
-            i += length;
-            continue;
-        }
-
-        auto const& node{m_global_schema_tree->get_node(cur_node_id)};
-        if (node_type_consumes_column(node.get_type())) {
-            bool const should_emit{
-                    ancestor_decomposed
-                    || (m_projection && false == m_projection->is_return_all_columns()
-                        && m_projection->matches_node(cur_node_id))
-                    || (m_projection
-                        && m_projection->is_projected_as(
-                                scope_node_id,
-                                search::Projection::NodeMask::Mode::Decompose
-                        ))
-            };
-            if (should_emit) {
-                scope.entries.push_back(
-                        DecompositionTarget{
-                                .node_id = cur_node_id,
-                                .reader_idx = column_reader_idx,
-                                .name = node.get_key_name(),
-                                .type = node.get_type()
-                        }
-                );
-            }
-            ++column_reader_idx;
-        }
-    }
+    ));
 
     scope.next_column_reader_idx = column_reader_idx;
     return scope;
@@ -1104,17 +1040,9 @@ auto SchemaReader::emit_parent_rule_arrays(
         bool ancestor_decomposed
 ) -> ystdlib::error_handling::Result<void> {
     for (auto const parent_rule_id : scope.parent_rule_insertion_order) {
-        auto const& occurrences{scope.parent_rule_occurrences.at(parent_rule_id)};
-
         auto const parent_rule_mask{
                 m_projection ? m_projection->get_node_mask(parent_rule_id)
                              : search::Projection::NodeMask{}
-        };
-        bool const parent_rule_has_decomposed{
-                parent_rule_mask.has(search::Projection::NodeMask::Mode::Decompose)
-        };
-        bool const parent_rule_has_shape{
-                parent_rule_mask.has(search::Projection::NodeMask::Mode::Shape)
         };
         bool const emit_text{
                 m_projection && false == m_projection->is_return_all_columns()
@@ -1124,25 +1052,24 @@ auto SchemaReader::emit_parent_rule_arrays(
                 m_projection && false == m_projection->is_return_all_columns()
                 && m_projection->has_projected_descendant(parent_rule_id)
         };
-
         bool const should_include{
-                ancestor_decomposed || emit_text || parent_rule_has_shape
+                ancestor_decomposed || emit_text
+                || parent_rule_mask.has(search::Projection::NodeMask::Mode::Shape)
                 || has_projected_descendant
         };
         if (false == should_include) {
             continue;
         }
 
-        auto const& parent_rule_node{m_global_schema_tree->get_node(parent_rule_id)};
-        auto const parent_rule_key_name{parent_rule_node.get_key_name()};
-        auto const parent_rule_column_name{m_global_schema_tree->build_column_name(parent_rule_id)};
-
-        bool const child_decomposed{ancestor_decomposed || parent_rule_has_decomposed};
-
         m_json_serializer.add_op(JsonSerializer::Op::BeginArray);
-        m_json_serializer.add_special_key(parent_rule_key_name);
+        m_json_serializer.add_special_key(
+                m_global_schema_tree->get_node(parent_rule_id).get_key_name()
+        );
 
-        for (auto const& occurrence : occurrences) {
+        auto const parent_rule_column_name{
+                m_global_schema_tree->build_ls_rule_name(parent_rule_id)
+        };
+        for (auto const& occurrence : scope.parent_rule_occurrences.at(parent_rule_id)) {
             m_json_serializer.add_op(JsonSerializer::Op::BeginUnnamedObject);
 
             if (emit_text) {
@@ -1152,22 +1079,23 @@ auto SchemaReader::emit_parent_rule_arrays(
                         log_shape_id,
                         parent_rule_column_name,
                         occurrence.start_column_reader_idx,
-                        occurrence.sub_span
+                        occurrence.sub_schema
                 ));
             }
 
-            if (parent_rule_has_shape) {
+            if (parent_rule_mask.has(search::Projection::NodeMask::Mode::Shape)) {
                 YSTDLIB_ERROR_HANDLING_TRYX(
                         emit_parent_rule_shape_substring(log_shape_id, parent_rule_column_name)
                 );
             }
 
             YSTDLIB_ERROR_HANDLING_TRYX(emit_decomposed_scope(
-                    occurrence.sub_span,
+                    occurrence.sub_schema,
                     parent_rule_id,
                     occurrence.start_column_reader_idx,
                     log_shape_id,
-                    child_decomposed
+                    ancestor_decomposed
+                            || parent_rule_mask.has(search::Projection::NodeMask::Mode::Decompose)
             ));
 
             m_json_serializer.add_op(JsonSerializer::Op::EndObject);
@@ -1179,15 +1107,13 @@ auto SchemaReader::emit_parent_rule_arrays(
 }
 
 auto SchemaReader::emit_decomposed_scope(
-        std::span<SchemaNode::id_t> schema,
+        SchemaView schema,
         SchemaNode::id_t scope_node_id,
         size_t column_idx,
         clpp::log_shape_id_t log_shape_id,
         bool ancestor_decomposed
 ) -> ystdlib::error_handling::Result<size_t> {
-    auto scope{YSTDLIB_ERROR_HANDLING_TRYX(
-            collect_scope_entries(schema, scope_node_id, column_idx, ancestor_decomposed)
-    )};
+    auto scope{collect_scope_entries(schema, scope_node_id, column_idx, ancestor_decomposed)};
     YSTDLIB_ERROR_HANDLING_TRYV(emit_grouped_leaf_entries(scope.entries));
     YSTDLIB_ERROR_HANDLING_TRYV(emit_parent_rule_arrays(scope, log_shape_id, ancestor_decomposed));
     return scope.next_column_reader_idx;
@@ -1244,34 +1170,19 @@ auto SchemaReader::emit_grouped_leaf_entries(std::vector<DecompositionTarget>& e
     return ystdlib::error_handling::success();
 }
 
-auto SchemaReader::aggregate_child_masks(
-        std::span<SchemaNode::id_t> schema,
-        SchemaNode::id_t log_msg_node_id
-) -> ystdlib::error_handling::Result<search::Projection::NodeMask> {
-    search::Projection::NodeMask child_mask;
-    if (m_projection) {
-        YSTDLIB_ERROR_HANDLING_TRYV(for_each_parent_rule_scope(
-                schema,
-                log_msg_node_id,
-                [&](auto parent_rule_id, auto) -> void {
-                    child_mask.merge(m_projection->get_node_mask(parent_rule_id));
-                }
-        ));
-    }
-    return child_mask;
-}
-
 auto SchemaReader::generate_log_message_template(SchemaNode::id_t log_msg_node_id)
         -> ystdlib::error_handling::Result<size_t> {
     auto log_msg_it{m_global_id_to_unordered_object.find(log_msg_node_id)};
     if (m_global_id_to_unordered_object.end() == log_msg_it) {
         return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Failure};
     }
-
-    auto const column_start{log_msg_it->second.first};
-    auto const schema{log_msg_it->second.second};
-
-    auto const log_shape_id{find_log_type_id_in_schema(schema, *m_global_schema_tree).value_or(0)};
+    auto const& record{log_msg_it->second};
+    if (false == record.log_shape_id.has_value()) {
+        return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Failure};
+    }
+    auto const log_shape_id{record.log_shape_id.value()};
+    auto const column_start{record.column_reader_start};
+    auto const schema{record.sub_schema};
 
     auto const key_name{m_global_schema_tree->get_node(log_msg_node_id).get_key_name()};
 
@@ -1279,10 +1190,6 @@ auto SchemaReader::generate_log_message_template(SchemaNode::id_t log_msg_node_i
             m_projection ? m_projection->get_node_mask(log_msg_node_id)
                          : search::Projection::NodeMask{}
     };
-    auto const child_mask{
-            YSTDLIB_ERROR_HANDLING_TRYX(aggregate_child_masks(schema, log_msg_node_id))
-    };
-    combined_mask.merge(child_mask);
 
     bool const emit_text{m_projection && m_projection->should_emit_value(log_msg_node_id)};
     bool const has_shape{combined_mask.has(search::Projection::NodeMask::Mode::Shape)};
@@ -1333,7 +1240,7 @@ auto SchemaReader::compile_shape(
         clpp::log_shape_id_t log_shape_id,
         std::string_view parent_rule_column_name,
         size_t start_column_reader_idx,
-        std::span<SchemaNode::id_t> schema_sub_span
+        SchemaView sub_schema
 ) -> CompiledShape {
     CompiledShape compiled_shape;
 
@@ -1360,11 +1267,9 @@ auto SchemaReader::compile_shape(
         return compiled_shape;
     }
 
-    auto [name_to_reader_indices, next_reader_idx]{build_name_to_reader_indices(
-            schema_sub_span,
-            *m_global_schema_tree,
-            start_column_reader_idx
-    )};
+    auto [name_to_reader_indices, next_reader_idx]{
+            build_name_to_reader_indices(sub_schema, *m_global_schema_tree, start_column_reader_idx)
+    };
     std::unordered_map<std::string, size_t> name_to_next_reader_idx;
 
     clpp::TextShape<std::string_view> const log_shape{shape_to_scan};

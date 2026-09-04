@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -15,36 +17,18 @@
 #include <clp/type_utils.hpp>
 #include <clp_s/archive_constants.hpp>
 #include <clp_s/ArchiveReaderAdaptor.hpp>
+#include <clp_s/ColumnReader.hpp>
 #include <clp_s/DictionaryReader.hpp>
 #include <clp_s/ErrorCode.hpp>
 #include <clp_s/InputConfig.hpp>
 #include <clp_s/ReaderUtils.hpp>
 #include <clp_s/SchemaTree.hpp>
+#include <clpp/Defs.hpp>
 #include <clpp/ErrorCode.hpp>
 #include <clpp/LogShapeStat.hpp>
 #include <clpp/ParentRuleShapes.hpp>
 
 namespace clp_s {
-namespace {
-/**
- * Determines whether an unordered-object subtree should be registered in
- * `m_global_id_to_unordered_object` for later lookup by its tree-node ID.
- *
- * `ParentRule` tree nodes are globally deduped by `(parent, key, type)`, so repeated same-named
- * parent matches within a single message share one node ID. `mark_unordered_object` keys the map
- * by that ID with silent `emplace` dedup, so a second occurrence would overwrite the first
- * occurrence's schema span — and no consumer looks up a `ParentRule` by ID today (the recursive
- * `SchemaReader` walks carry the owning node through the tree instead). Excluding `ParentRule`
- * keeps the map 1:1 for the nodes consumers do look up (`LogMessage`, `StructuredArray`, `Object`).
- *
- * @param subtree_root_type The node type of the unordered-object subtree root.
- * @return true if the subtree should be marked, false otherwise.
- */
-[[nodiscard]] auto should_mark_unordered_object(NodeType subtree_root_type) -> bool {
-    return NodeType::ParentRule != subtree_root_type;
-}
-}  // namespace
-
 void ArchiveReader::open(Path const& archive_path, Options const& options) {
     if (m_is_open) {
         throw OperationFailed(ErrorCodeNotReady, __FILENAME__, __LINE__);
@@ -360,8 +344,6 @@ BaseColumnReader* ArchiveReader::append_reader_column(SchemaReader& reader, int3
         case NodeType::Object:
         case NodeType::StructuredArray:
         case NodeType::LogMessage:
-        case NodeType::LogType:
-        case NodeType::LogTypeID:
         case NodeType::ParentRule:
         case NodeType::Unknown:
             break;
@@ -373,88 +355,111 @@ BaseColumnReader* ArchiveReader::append_reader_column(SchemaReader& reader, int3
     return column_reader;
 }
 
-void ArchiveReader::append_unordered_reader_columns(
-        SchemaReader& reader,
-        int32_t mst_subtree_root_node_id,
-        std::span<Schema::id_t> schema_ids,
-        bool should_marshal_records
-) {
-    size_t object_begin_pos = reader.get_column_size();
-    for (size_t i = 0; i < schema_ids.size(); ++i) {
-        auto const column_id{schema_ids[i]};
-        if (Schema::schema_entry_is_unordered_object(column_id)) {
-            auto length{Schema::get_unordered_object_length(column_id)};
-            auto sub_schema{schema_ids.subspan(i + 1, length)};
-            auto subtree_root_node_id{m_schema_tree->find_matching_subtree_root_in_subtree(
-                    mst_subtree_root_node_id,
-                    SchemaReader::get_first_column_in_span(sub_schema),
-                    Schema::get_unordered_object_type(column_id)
-            )};
-            append_unordered_reader_columns(
-                    reader,
-                    subtree_root_node_id,
-                    sub_schema,
-                    should_marshal_records
-            );
-            i += length;
-            continue;
-        }
-        BaseColumnReader* column_reader = nullptr;
-        auto const& node = m_schema_tree->get_node(column_id);
-        switch (node.get_type()) {
-            case NodeType::Integer:
-                column_reader = new Int64ColumnReader(column_id);
-                break;
-            case NodeType::DeltaInteger:
-                column_reader = new DeltaEncodedInt64ColumnReader(column_id);
-                break;
-            case NodeType::Float:
-                column_reader = new FloatColumnReader(column_id);
-                break;
-            case NodeType::FormattedFloat:
-                column_reader = new FormattedFloatColumnReader(column_id);
-                break;
-            case NodeType::DictionaryFloat:
-                column_reader = new DictionaryFloatColumnReader(column_id, m_var_dict);
-                break;
-            case NodeType::ClpString:
-                column_reader = new ClpStringColumnReader(column_id, m_var_dict, m_log_dict);
-                break;
-            case NodeType::VarString:
-                column_reader = new VariableStringColumnReader(column_id, m_var_dict);
-                break;
-            case NodeType::Boolean:
-                column_reader = new BooleanColumnReader(column_id);
-                break;
-            // UnstructuredArray, DeprecatedDateString, and Timestamp currently aren't supported as
-            // part of any unordered object, so we disregard them here
-            case NodeType::UnstructuredArray:
-            case NodeType::DeprecatedDateString:
-            case NodeType::Timestamp:
-            // No need to push columns without associated object readers into the SchemaReader.
-            case NodeType::StructuredArray:
-            case NodeType::Object:
-            case NodeType::Metadata:
-            case NodeType::NullValue:
-            case NodeType::LogMessage:
-            case NodeType::LogType:
-            case NodeType::LogTypeID:
-            case NodeType::ParentRule:
-            case NodeType::Unknown:
-                break;
-        }
-
-        if (column_reader) {
-            reader.append_unordered_column(column_reader);
-        }
+auto
+ArchiveReader::resolve_unordered_object_root(UnorderedObject const& obj, int32_t search_root_id)
+        -> int32_t {
+    if (obj.root_node_id.has_value()) {
+        return obj.root_node_id.value();
     }
+    return m_schema_tree->find_matching_subtree_root_in_subtree(
+            search_root_id,
+            SchemaReader::get_first_column_in_span(obj.sub_schema),
+            obj.type
+    );
+}
 
-    if (should_marshal_records
-        && should_mark_unordered_object(
-                m_schema_tree->get_node(mst_subtree_root_node_id).get_type()
-        ))
-    {
-        reader.mark_unordered_object(object_begin_pos, mst_subtree_root_node_id, schema_ids);
+auto ArchiveReader::append_unordered_reader_columns(
+        SchemaReader& reader,
+        SchemaNode::id_t mst_subtree_root_node_id,
+        SchemaView sub_schema,
+        std::optional<clpp::log_shape_id_t> log_shape_id,
+        bool should_marshal_records
+) -> void {
+    size_t const object_begin_pos{reader.get_column_size()};
+    static_cast<void>(sub_schema.visit_entries(
+            [&](SchemaNode::id_t node_id) -> bool {
+                switch (m_schema_tree->get_node(node_id).get_type()) {
+                    case NodeType::Integer:
+                        reader.append_unordered_column(
+                                std::make_unique<Int64ColumnReader>(node_id)
+                        );
+                        break;
+                    case NodeType::DeltaInteger:
+                        reader.append_unordered_column(
+                                std::make_unique<DeltaEncodedInt64ColumnReader>(node_id)
+                        );
+                        break;
+                    case NodeType::Float:
+                        reader.append_unordered_column(
+                                std::make_unique<FloatColumnReader>(node_id)
+                        );
+                        break;
+                    case NodeType::FormattedFloat:
+                        reader.append_unordered_column(
+                                std::make_unique<FormattedFloatColumnReader>(node_id)
+                        );
+                        break;
+                    case NodeType::DictionaryFloat:
+                        reader.append_unordered_column(
+                                std::make_unique<DictionaryFloatColumnReader>(node_id, m_var_dict)
+                        );
+                        break;
+                    case NodeType::ClpString:
+                        reader.append_unordered_column(
+                                std::make_unique<ClpStringColumnReader>(
+                                        node_id,
+                                        m_var_dict,
+                                        m_log_dict
+                                )
+                        );
+                        break;
+                    case NodeType::VarString:
+                        reader.append_unordered_column(
+                                std::make_unique<VariableStringColumnReader>(node_id, m_var_dict)
+                        );
+                        break;
+                    case NodeType::Boolean:
+                        reader.append_unordered_column(
+                                std::make_unique<BooleanColumnReader>(node_id)
+                        );
+                        break;
+                    // UnstructuredArray, DeprecatedDateString, and Timestamp currently aren't
+                    // supported as part of any unordered object, so we disregard them here
+                    case NodeType::UnstructuredArray:
+                    case NodeType::DeprecatedDateString:
+                    case NodeType::Timestamp:
+                    // No need to push columns without associated object readers into the
+                    // SchemaReader.
+                    case NodeType::StructuredArray:
+                    case NodeType::Object:
+                    case NodeType::Metadata:
+                    case NodeType::NullValue:
+                    case NodeType::LogMessage:
+                    case NodeType::ParentRule:
+                    case NodeType::Unknown:
+                        break;
+                }
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                append_unordered_reader_columns(
+                        reader,
+                        resolve_unordered_object_root(obj, mst_subtree_root_node_id),
+                        obj.sub_schema,
+                        obj.log_shape_id,
+                        should_marshal_records
+                );
+                return false;
+            }
+    ));
+
+    if (should_marshal_records) {
+        reader.mark_unordered_object(
+                object_begin_pos,
+                mst_subtree_root_node_id,
+                sub_schema,
+                log_shape_id
+        );
     }
 }
 
@@ -480,49 +485,45 @@ void ArchiveReader::initialize_schema_reader(
     );
     auto timestamp_column_ids
             = get_timestamp_dictionary()->get_authoritative_timestamp_column_ids();
-    for (size_t i = 0; i < schema.size(); ++i) {
-        int32_t column_id = schema[i];
-        if (Schema::schema_entry_is_unordered_object(column_id)) {
-            size_t length = Schema::get_unordered_object_length(column_id);
 
-            auto sub_schema = schema.get_view(i + 1, length);
-            auto mst_subtree_root_node_id = m_schema_tree->find_matching_subtree_root_in_subtree(
-                    -1,
-                    SchemaReader::get_first_column_in_span(sub_schema),
-                    Schema::get_unordered_object_type(column_id)
-            );
-            append_unordered_reader_columns(
-                    reader,
-                    mst_subtree_root_node_id,
-                    sub_schema,
-                    should_marshal_records
-            );
-            i += length;
-            continue;
-        }
-        if (i >= schema.get_num_ordered()) {
-            // Length one unordered object that doesn't have a tag. This is only allowed when the
-            // column id is the root of the unordered object, so we can pass it directly to
-            // append_unordered_reader_columns.
-            append_unordered_reader_columns(
-                    reader,
-                    column_id,
-                    std::span<int32_t>(),
-                    should_marshal_records
-            );
-            continue;
-        }
-        BaseColumnReader* column_reader = append_reader_column(reader, column_id);
-
-        if (column_id == m_log_event_idx_column_id) {
+    for (auto const node_id : schema.get_ordered_schema_view()) {
+        auto* column_reader{append_reader_column(reader, node_id)};
+        if (node_id == m_log_event_idx_column_id) {
             reader.mark_column_as_log_event_idx(column_reader);
         }
 
-        if (should_extract_timestamp && column_reader && timestamp_column_ids.count(column_id) > 0)
+        if (should_extract_timestamp && nullptr != column_reader
+            && timestamp_column_ids.contains(node_id))
         {
             reader.mark_column_as_timestamp(column_reader);
         }
     }
+
+    static_cast<void>(schema.get_unordered_schema_view().visit_entries(
+            [&](SchemaNode::id_t node_id) -> bool {
+                // A lone MST node ID entry in the unordered region is only allowed when the ID is
+                // the root of the unordered object, so we can pass it directly to
+                // append_unordered_reader_columns with an empty sub-schema.
+                append_unordered_reader_columns(
+                        reader,
+                        node_id,
+                        SchemaView{{}},
+                        std::nullopt,
+                        should_marshal_records
+                );
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                append_unordered_reader_columns(
+                        reader,
+                        resolve_unordered_object_root(obj, -1),
+                        obj.sub_schema,
+                        obj.log_shape_id,
+                        should_marshal_records
+                );
+                return false;
+            }
+    ));
 }
 
 void ArchiveReader::store(FileWriter& writer) {

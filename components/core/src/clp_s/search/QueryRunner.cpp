@@ -12,6 +12,8 @@
 #include <fmt/format.h>
 #include <string_utils/string_utils.hpp>
 
+#include <clp_s/Schema.hpp>
+
 #include "../../clp/Defs.h"
 #include "../../clp/GrepCore.hpp"
 #include "../../clp/Query.hpp"
@@ -98,6 +100,11 @@ auto evaluate_numeric_wildcard_filter(
 void QueryRunner::global_init() {
     populate_internal_columns();
     populate_string_queries(m_expr);
+    // Clpp interpretation filters are stored separately from the global query as they are already
+    // per-schema.
+    for (auto const& [schema_id, expr] : m_match->get_all_schema_queries()) {
+        populate_string_queries(expr);
+    }
 }
 
 auto QueryRunner::schema_init(int32_t schema_id) -> EvaluatedValue {
@@ -1059,12 +1066,9 @@ void QueryRunner::populate_searched_wildcard_columns(std::shared_ptr<Expression>
         }
         m_wildcard_columns.push_back(col);
         literal_type_bitmask_t matching_types{0};
-        for (int32_t node : (*m_schemas)[m_schema]) {
-            if (Schema::schema_entry_is_unordered_object(node)) {
-                continue;
-            }
-            if (0 != m_metadata_columns.count(node)) {
-                continue;
+        (*m_schemas)[m_schema].get_view().for_each_node_id([&](SchemaNode::id_t node) -> void {
+            if (m_metadata_columns.contains(node)) {
+                return;
             }
             auto tree_node_type = m_schema_tree->get_node(node).get_type();
             if (col->matches_type(SchemaNode::node_to_literal_type(tree_node_type))) {
@@ -1076,7 +1080,7 @@ void QueryRunner::populate_searched_wildcard_columns(std::shared_ptr<Expression>
                     m_wildcard_to_searched_basic_columns[col].insert(node);
                 }
             }
-        }
+        });
         col->set_matching_types(matching_types);
     }
 }

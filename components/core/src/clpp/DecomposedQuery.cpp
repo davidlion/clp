@@ -1,6 +1,7 @@
 #include "DecomposedQuery.hpp"
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,36 +14,70 @@
 #include <clpp/TextShape.hpp>
 
 namespace clpp {
-auto DecomposedQuery::decompose_query(
-        log_surgeon::Parser& parser,
-        std::string_view rule_name,
-        std::string_view query
-) -> ystdlib::error_handling::Result<DecomposedQuery> {
-    auto const interpretations{parser.search_by_name(
-            log_surgeon::CCharArray::from_string_view(query),
-            log_surgeon::CCharArray::from_string_view(rule_name)
-    )};
+namespace {
+/**
+ * Use the log-surgeon sub-query segments to build a query interpretation.
+ */
+auto build_interpretation(std::vector<log_surgeon::SubQuery> const& sub_queries)
+        -> DecomposedQuery::Interpretation;
 
+auto build_interpretation(std::vector<log_surgeon::SubQuery> const& sub_queries)
+        -> DecomposedQuery::Interpretation {
+    TextShape<std::string> shape_query;
+    std::vector<DecomposedQuery::LeafQuery> leaf_queries;
+    for (auto const& sub_query : sub_queries) {
+        if (sub_query.qualified_name.empty()) {
+            shape_query.escape_and_append(sub_query.value);
+        } else {
+            leaf_queries.emplace_back(sub_query.qualified_name, sub_query.value);
+            shape_query.append_placeholder(sub_query.qualified_name);
+        }
+    }
+    return {std::move(shape_query), std::move(leaf_queries)};
+}
+}  // namespace
+
+auto DecomposedQuery::decompose_by_rule_name(
+        log_surgeon::Parser& parser,
+        std::string_view query,
+        std::string_view rule_name
+) -> ystdlib::error_handling::Result<DecomposedQuery> {
+    auto const interpretations{parser.search_by_name(query, rule_name)};
     if (interpretations.empty()) {
         return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::DecomposeQueryFailure};
     }
 
     std::vector<Interpretation> interps;
+    interps.reserve(interpretations.size());
     for (auto const& sub_queries : interpretations) {
-        TextShape<std::string> shape_query;
-        std::vector<LeafQuery> leaf_queries;
-        for (auto const& sub_query : sub_queries) {
-            if (sub_query.qualified_name.empty()) {
-                shape_query.escape_and_append(sub_query.value);
-            } else {
-                leaf_queries.emplace_back(sub_query.qualified_name, sub_query.value);
-                shape_query.append_placeholder(sub_query.qualified_name);
-            }
-        }
-        interps.emplace_back(std::move(shape_query), std::move(leaf_queries));
+        interps.emplace_back(build_interpretation(sub_queries));
+    }
+    return DecomposedQuery{std::move(interps)};
+}
+
+auto DecomposedQuery::decompose_by_log_shapes(
+        log_surgeon::Parser& parser,
+        std::string_view query,
+        std::span<std::string_view const> log_shapes
+) -> std::vector<DecomposedQuery> {
+    std::vector<log_surgeon::CCharArray> ffi_shapes;
+    ffi_shapes.reserve(log_shapes.size());
+    for (auto const shape : log_shapes) {
+        ffi_shapes.push_back(log_surgeon::CCharArray::from_string_view(shape));
     }
 
-    return DecomposedQuery{interps};
+    auto const interpretations_by_shapes{parser.search_by_log_shapes(query, ffi_shapes)};
+    std::vector<DecomposedQuery> decomposed_queries;
+    decomposed_queries.reserve(interpretations_by_shapes.size());
+    for (auto const& interpretations : interpretations_by_shapes) {
+        std::vector<Interpretation> interps;
+        interps.reserve(interpretations.size());
+        for (auto const& sub_queries : interpretations) {
+            interps.emplace_back(build_interpretation(sub_queries));
+        }
+        decomposed_queries.push_back(DecomposedQuery{std::move(interps)});
+    }
+    return decomposed_queries;
 }
 
 auto DecomposedQuery::split_qualified_name(std::string_view const qualified_name)

@@ -4,11 +4,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <utility>
 
 namespace clpp {
-using log_shape_id_t = uint64_t;
+using log_shape_id_t = uint32_t;
+inline constexpr log_shape_id_t cMaxLogShapeId{std::numeric_limits<log_shape_id_t>::max()};
 
 /**
  * Matches the value of log-surgeon's `Match::encoding_idx` which is assigned in insertion order.

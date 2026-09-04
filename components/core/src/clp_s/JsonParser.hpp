@@ -229,16 +229,20 @@ private:
     /**
      * Parse a string field as an unstructured log message using log surgeon and store its
      * components in the current parsed message, clp-s schema, and dictionaries.
-     * @param str_field
      * @param parent_node_id
+     * @param field_key
+     * @param field_value
      * @return A result containing an error code indicating the failure:
      * - ClppErrorCodeEnum::Failure if parsing fails.
      * - Forwards `store_capture_groups`'s return values on failure.
      * - Forwards `m_archive_writer->update_log_shape_dict`'s return values on failure.
      * - Forwards `m_archive_writer->update_parent_rule_shapes`'s return values on failure.
      */
-    auto parse_str_field(std::string_view str_field, SchemaNode::id_t log_msg_node_id)
-            -> ystdlib::error_handling::Result<void>;
+    auto parse_str_field(
+            SchemaNode::id_t parent_node_id,
+            std::string_view field_key,
+            std::string_view field_value
+    ) -> ystdlib::error_handling::Result<void>;
 
     /**
      * Attempts to parse a string lexeme as a float and add it to the current parsed message
