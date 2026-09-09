@@ -125,6 +125,12 @@ option(
     ON
 )
 
+option(
+    CLP_BUILD_CLPP_DECOMPOSITION
+    "Enable clp+ query decomposition (log-surgeon interpretation generation)."
+    OFF
+)
+
 # Validates that the `CLP_BUILD_` options required by `TARGET_CLP_BUILD_OPTION` are `ON`.
 #
 # @param {string} TARGET_CLP_BUILD_OPTION

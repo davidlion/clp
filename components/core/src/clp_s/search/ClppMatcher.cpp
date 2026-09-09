@@ -22,6 +22,9 @@ namespace clp_s::search {
 ClppMatcher::ClppMatcher(std::shared_ptr<ArchiveReader> archive_reader, bool case_sensitive)
         : m_archive_reader{std::move(archive_reader)},
           m_case_sensitive{case_sensitive} {
+    if (false == m_archive_reader->experimental()) {
+        return;
+    }
     auto const log_shape_dict{m_archive_reader->get_log_shape_dictionary()};
     if (nullptr == log_shape_dict) {
         throw std::runtime_error{"ClppMatcher got a null log shape dictionary"};

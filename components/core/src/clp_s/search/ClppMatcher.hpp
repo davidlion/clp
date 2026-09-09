@@ -34,6 +34,7 @@ public:
     // Constructors
     /**
      * Builds the log shape to schemas index using `archive_reader` to enable clpp querying.
+     * If the archive is not experimental construction is skipped and the object is invalid.
      * @param archive_reader
      * @param case_sensitive Whether matching is case sensitive.
      * @throws std::runtime_error if the log shape dictionary is not valid.
@@ -61,6 +62,8 @@ public:
      * @return The matching interpretations, or an error code indicating the failure:
      * - Forwards `decompose_by_log_shape`'s return values.
      * - Forwards `decompose_by_rule_name`'s return values.
+     * @throws std::system_error (clpp::ClppErrorCodeEnum::Unsupported) if built without
+     * CLP_BUILD_CLPP_DECOMPOSITION.
      */
     [[nodiscard]] auto decompose_query(std::string_view query, std::string_view rule_name)
             -> ystdlib::error_handling::Result<std::vector<InterpretationMatch>>;

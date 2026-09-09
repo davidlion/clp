@@ -52,6 +52,8 @@ struct Interpretation {
  * @param rule_name The qualified (dot-separated) log-surgeon rule name.
  * @return The interpretations, or an error code indicating the failure:
  * - clpp::ClppErrorCodeEnum::DecomposeQueryFailure if log-surgeon returned no interpretations.
+ * @throws std::system_error (clpp::ClppErrorCodeEnum::Unsupported) if built without
+ * CLP_BUILD_CLPP_DECOMPOSITION.
  */
 [[nodiscard]] auto decompose_by_rule_name(
         log_surgeon::Parser& parser,
@@ -68,6 +70,8 @@ struct Interpretation {
  * @param log_shapes
  * @return A vector of the interpretations for every shape in `log_shapes`. The vector is the same
  * size and order of `log_shapes`, with empty elements for shapes that cannot match the query.
+ * @throws std::system_error (clpp::ClppErrorCodeEnum::Unsupported) if built without
+ * CLP_BUILD_CLPP_DECOMPOSITION.
  */
 auto decompose_by_log_shapes(
         log_surgeon::Parser& parser,

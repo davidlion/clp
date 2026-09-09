@@ -7,6 +7,10 @@
 #include <utility>
 #include <vector>
 
+#if CLP_BUILD_CLPP_DECOMPOSITION
+    #include <system_error>
+#endif
+
 #include <log_surgeon/log_surgeon.hpp>
 #include <ystdlib/error_handling/Result.hpp>
 
@@ -15,6 +19,7 @@
 
 namespace clpp {
 namespace {
+#if CLP_BUILD_CLPP_DECOMPOSITION
 /**
  * Builds one interpretation from a log-surgeon sub-query segmentation: the segments without a rule
  * name form the shape query's static text, and each segment with a rule name becomes a leaf query
@@ -35,8 +40,15 @@ auto build_interpretation(std::vector<log_surgeon::SubQuery> const& sub_queries)
     }
     return {std::move(shape_query), std::move(leaf_queries)};
 }
+#else
+constexpr std::string_view cDecompositionUnsupportedMessage{
+        "clp+ query decomposition is not supported in this build; rebuild with"
+        " -DCLP_BUILD_CLPP_DECOMPOSITION=ON"
+};
+#endif
 }  // namespace
 
+#if CLP_BUILD_CLPP_DECOMPOSITION
 auto decompose_by_rule_name(
         log_surgeon::Parser& parser,
         std::string_view query,
@@ -79,6 +91,28 @@ auto decompose_by_log_shapes(
     }
     return interpretations_by_shape;
 }
+#else
+auto decompose_by_rule_name(log_surgeon::Parser&, std::string_view, std::string_view)
+        -> ystdlib::error_handling::Result<std::vector<Interpretation>> {
+    throw std::system_error{
+            ystdlib::error_handling::make_error_code(
+                    clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Unsupported}
+            ),
+            std::string{cDecompositionUnsupportedMessage}
+    };
+}
+
+auto
+decompose_by_log_shapes(log_surgeon::Parser&, std::string_view, std::span<std::string_view const>)
+        -> std::vector<std::vector<Interpretation>> {
+    throw std::system_error{
+            ystdlib::error_handling::make_error_code(
+                    clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::Unsupported}
+            ),
+            std::string{cDecompositionUnsupportedMessage}
+    };
+}
+#endif
 
 auto split_qualified_name(std::string_view const qualified_name) -> std::vector<std::string_view> {
     std::vector<std::string_view> rule_names;

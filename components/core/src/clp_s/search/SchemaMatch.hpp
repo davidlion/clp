@@ -172,6 +172,8 @@ private:
      * @param rule_name The parent rule name, or empty for a LogMessage node.
      * @return The filter expression, or nullptr if no interpretation matched.
      * @throws std::runtime_error if decomposition fails.
+     * @throws std::system_error (clpp::ClppErrorCodeEnum::Unsupported) if built without
+     * CLP_BUILD_CLPP_DECOMPOSITION.
      */
     auto build_decomposed_query_filter(
             std::shared_ptr<ast::ColumnDescriptor> const& column,
@@ -353,8 +355,8 @@ private:
      * - run() clears m_column_to_descriptor before re-running populate_column_mapping, but leaves
      *   m_descriptor_to_schema intact, so these mappings survive.
      * - The is_clpp_resolved flag keeps the column out of m_column_to_descriptor, so
-     *   populate_schema_mapping skips it. That function maps a column to every schema containing its
-     *   node, which for a clpp column would add back the schemas whose shape did not match.
+     *   populate_schema_mapping skips it. That function maps a column to every schema containing
+     *   its node, which for a clpp column would add back the schemas whose shape did not match.
      *
      * @param column The column descriptor to register.
      * @param node_id The schema-tree node ID to map to.

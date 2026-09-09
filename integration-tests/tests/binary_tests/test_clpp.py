@@ -4,6 +4,7 @@ over structurized log messages, projection output structure, and value encoding 
 """
 
 import json
+import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -26,6 +27,12 @@ pytestmark = pytest.mark.core
 LeafValueT = Sequence[float | int | str]
 MatchT = dict[str, LeafValueT | str]
 DecomposedT = dict[str, list[MatchT] | LeafValueT | str]
+
+_DECOMPOSITION_SUPPORTED: Final[bool] = os.environ.get("CLP_BUILD_CLPP_DECOMPOSITION") == "1"
+_requires_decomposition = pytest.mark.skipif(
+    not _DECOMPOSITION_SUPPORTED,
+    reason="Requires clp-s built with -DCLP_BUILD_CLPP_DECOMPOSITION=ON",
+)
 
 
 class _InflightMatch:
@@ -237,6 +244,8 @@ def test_clpp_search_leaf(
 
 
 @pytest.mark.clpp
+@pytest.mark.clpp_decomposition
+@_requires_decomposition
 def test_clpp_search_parent_rule(
     clp_core_path_config: ClpCorePathConfig,
     clpp_archive: Path,
@@ -272,6 +281,8 @@ def test_clpp_search_parent_rule(
 
 
 @pytest.mark.clpp
+@pytest.mark.clpp_decomposition
+@_requires_decomposition
 def test_clpp_search_full_message(
     clp_core_path_config: ClpCorePathConfig,
     clpp_archive: Path,
@@ -300,6 +311,8 @@ def test_clpp_search_full_message(
 
 
 @pytest.mark.clpp
+@pytest.mark.clpp_decomposition
+@_requires_decomposition
 def test_clpp_search_no_match(
     clp_core_path_config: ClpCorePathConfig,
     clpp_archive: Path,
