@@ -8,6 +8,8 @@ set(
         AddTimestampConditions.hpp
         ColumnScan.cpp
         ColumnScan.hpp
+        ClppMatcher.cpp
+        ClppMatcher.hpp
         EvaluateRangeIndexFilters.cpp
         EvaluateRangeIndexFilters.hpp
         EvaluateTimestampIndex.cpp

@@ -2,16 +2,16 @@ if(CLP_BUILD_CLP_S_CLP_DEPENDENCIES)
         add_library(
                 clpp_core
                 Array.hpp
-                DecomposedQuery.cpp
-                DecomposedQuery.hpp
                 Defs.hpp
                 ErrorCode.cpp
                 ErrorCode.hpp
-                TextShape.hpp
+                Interpretation.cpp
+                Interpretation.hpp
                 LogShapeStat.cpp
                 LogShapeStat.hpp
                 ParentRuleShapes.cpp
                 ParentRuleShapes.hpp
+                TextShape.hpp
                 utils.cpp
                 utils.hpp
         )

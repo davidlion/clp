@@ -528,7 +528,7 @@ bool search_archive(
     // Narrow against schemas
     auto match_pass = std::make_shared<SchemaMatch>(
             archive_reader,
-            command_line_arguments.get_ignore_case()
+            !command_line_arguments.get_ignore_case()
     );
     if (expr = match_pass->run(expr); std::dynamic_pointer_cast<ast::EmptyExpr>(expr)) {
         record_early_termination(cTerminationStageSchemaMatching);

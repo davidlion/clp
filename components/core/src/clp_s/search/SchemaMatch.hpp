@@ -1,7 +1,6 @@
 #ifndef CLP_S_SEARCH_SCHEMAMATCH_HPP
 #define CLP_S_SEARCH_SCHEMAMATCH_HPP
 
-#include <concepts>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -9,16 +8,14 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include <log_surgeon/log_surgeon.hpp>
-#include <ystdlib/error_handling/Result.hpp>
-
-#include <clp_s/DictionaryReader.hpp>
-#include <clpp/DecomposedQuery.hpp>
+#include <clp_s/search/ClppMatcher.hpp>
+#include <clpp/Interpretation.hpp>
 
 #include "../ReaderUtils.hpp"
 #include "ast/ColumnDescriptor.hpp"
@@ -30,17 +27,10 @@
 #include "clp_s/SchemaTree.hpp"
 
 namespace clp_s::search {
-/**
- * A callable that takes a std::string_view and returns something convertible to bool.
- * Used to constrain the matcher argument of `find_schemas_matching_predicate`.
- */
-template <typename Matcher>
-concept StringViewPredicate = std::predicate<Matcher, std::string_view>;
-
 class SchemaMatch : public ast::Transformation {
 public:
     // Constructor
-    SchemaMatch(std::shared_ptr<ArchiveReader> archive_reader, bool ignore_case);
+    SchemaMatch(std::shared_ptr<ArchiveReader> archive_reader, bool case_sensitive);
 
     /**
      * Runs the transformation on an expression
@@ -92,8 +82,8 @@ public:
     bool has_array_search(int32_t schema_id);
 
     /**
-     * @return The total number of clpp interpretations created during schema matching. Each unique
-     * (column_name, query) decomposition is counted once.
+     * @return The total number of clpp interpretations created during schema matching. Every
+     * interpretation returned by a decomposition is counted once.
      */
     [[nodiscard]] auto get_num_clpp_interpretations() const -> uint64_t {
         return m_num_clpp_interpretations;
@@ -106,21 +96,20 @@ private:
      * leaf columns in m_descriptor_to_schema for the given schemas.
      *
      * When m_leaf_queries is non-empty, returns an AndExpr of leaf equality/existence filters.
-     * When m_leaf_queries is empty (the match is purely on static shape text), registers the column
-     * and returns an EXISTS filter — every document in the matched schemas contains the queried
-     * text.
+     * When m_leaf_queries is empty (the match is purely on shape text), registers the column and
+     * returns an EXISTS filter.
      *
-     * Returns std::nullopt only if a leaf column cannot be resolved in the schema tree.
      * @param column The original column descriptor triggering clpp decomposition.
      * @param root_node_id The schema-tree node where decomposition is rooted.
      * @param interpretation The single interpretation to build the expression from.
      * @param matched_schema_ids Schemas to register the leaf columns against.
-     * @return The expression, or std::nullopt on resolution failure.
+     * @return The expression, or std::nullopt if a leaf column cannot be resolved in the schema
+     * tree.
      */
     auto build_leaf_query_expr(
             std::shared_ptr<ast::ColumnDescriptor> const& column,
             SchemaNode::id_t root_node_id,
-            clpp::DecomposedQuery::Interpretation const& interpretation,
+            clpp::Interpretation const& interpretation,
             std::unordered_set<int32_t> const& matched_schema_ids
     ) -> std::optional<std::shared_ptr<ast::Expression>>;
 
@@ -149,12 +138,6 @@ private:
             >;
 
     /**
-     * Builds the reverse mapping from log_shape_id to schema_id by scanning schemas
-     * for their NodeType::LogTypeID nodes.
-     */
-    void build_log_shape_id_to_schema_id_map();
-
-    /**
      * Finds all child schema nodes whose key name matches the given name.
      * @param parent_id The parent schema node ID.
      * @param key_name The key name to match.
@@ -164,52 +147,58 @@ private:
             -> std::vector<SchemaNode::id_t>;
 
     /**
-     * Iterates the log shape dictionary and returns schema IDs whose log shapes match a
-     * predicate. For LogMessage nodes, the predicate receives the full log-shape value. For
-     * ParentRule nodes, the predicate receives the log shape substring for the parent rule match of
-     * `column_name`.
-     * @tparam Matcher A callable `bool(std::string_view)` returning true if the argument matches.
-     * @param column_name The column name of the node (empty for LogMessage).
-     * @param log_shape_dict The log shape dictionary to scan.
-     * @param matcher A Matcher returning true if a predicate matches a log-shape.
-     * @return The set of schema IDs whose log shapes matched.
+     * Handles an EXISTS or shape() filter at a LogMessage or ParentRule node: finds the schemas
+     * whose shapes (log shape or `rule_name` parent rule shapes) satisfying `shape_query`, and
+     * returns an EXISTS filter over the resolved column descriptor.
+     * @param shape_query A wildcard pattern, or std::nullopt to match every shape.
+     * @return The filter expression, or nullptr if no schemas match.
      */
-    template <StringViewPredicate Matcher>
-    auto find_schemas_matching_predicate(
-            std::string_view column_name,
-            clp_s::LogShapeDictionaryReader& log_shape_dict,
-            Matcher const& matcher
-    ) -> std::unordered_set<int32_t>;
+    auto build_shape_match_filter(
+            std::shared_ptr<ast::ColumnDescriptor> const& column,
+            SchemaNode::id_t root_node_id,
+            std::string_view rule_name,
+            std::optional<std::string_view> shape_query,
+            bool is_inverted
+    ) -> std::shared_ptr<ast::Expression>;
 
     /**
-     * Looks up a decomposed clpp query from the cache, lazily initializing the log-surgeon
-     * parser and parsing specificatino on first use. The cache is keyed on the
-     * column name and the raw query string.
-     * @param column_name The dot-separated column name (e.g.
-     * "message.block_id").
-     * @param query The raw CLP-string query text.
-     * @return A pointer to the cached DecomposedQuery on success.
+     * Handles a value filter at a LogMessage or ParentRule node by decomposing `query` and OR-ing
+     * together the leaf query expressions of every interpretation found to match a schema.
+     *
+     * Each interpretation's leaf columns are registered (via register_clpp_resolved_column) only
+     * for the schemas whose log shape matched that interpretation. intersect_schemas records those
+     * per-sub-expression schema sets, and split_expression_by_schema uses them so that each
+     * schema's query (m_schema_to_query) keeps only the interpretations relevant to it.
+     * @param rule_name The parent rule name, or empty for a LogMessage node.
+     * @return The filter expression, or nullptr if no interpretation matched.
+     * @throws std::runtime_error if decomposition fails.
      */
-    auto lookup_decomposed_query(std::string const& column_name, std::string const& query)
-            -> ystdlib::error_handling::Result<clpp::DecomposedQuery const*>;
+    auto build_decomposed_query_filter(
+            std::shared_ptr<ast::ColumnDescriptor> const& column,
+            SchemaNode::id_t root_node_id,
+            std::string_view rule_name,
+            std::string_view query
+    ) -> std::shared_ptr<ast::Expression>;
 
     /**
-     * Decomposes a CLP-string query at a LogMessage or ParentRule node, matches log shapes against
-     * the dictionary, and returns an OrExpr of leaf filter expressions.
+     * Resolves a clpp filter at a LogMessage or ParentRule node into an expression.
      *
-     * Handles both direct LogMessage queries (message: "...") and ParentRule queries.
-     * Wildcard expansion (message.*:...) is handled by the unresolved descriptor expansion in
-     * populate_column_mapping, not here.
+     * `root_node_id` decides what the query is matched against: at a LogMessage node it is matched
+     * against whole log shapes, and at a ParentRule node only against that rule's shapes.
      *
-     * Returns nullptr if no schemas match, decomposition fails, or a leaf column cannot be
-     * resolved in the schema tree.
+     * There are 3 possible filter cases:
+     * 1. EXISTS: matches every schema that contains the node.
+     * 2. shape(): matches the schemas containing shapes satisfying the query.
+     * 3. Any other operation: the query is decomposed into interpretations, each expanded
+     *   into leaf filters.
+     *
      * @param column The column triggering clpp decomposition.
      * @param root_node_id The schema-tree node where decomposition is rooted (LogMessage or
-     *     ParentRule).
+     * ParentRule).
      * @param filter The FilterExpr containing the operation and operand.
      * @return The transformed expression on success, nullptr otherwise.
      */
-    auto resolve_clpp_query(
+    auto build_clpp_query_filter(
             std::shared_ptr<ast::ColumnDescriptor> const& column,
             SchemaNode::id_t root_node_id,
             ast::FilterExpr const& filter
@@ -233,15 +222,9 @@ private:
     std::unordered_map<int32_t, std::set<int32_t>> m_schema_to_searched_columns;
     std::shared_ptr<SchemaTree> m_tree;
     std::shared_ptr<ReaderUtils::SchemaMap> m_schemas;
-    // TODO clpp: refactor m_tree and m_schemas
-    std::shared_ptr<ArchiveReader> m_archive_reader;
     bool m_clpp_decomposed_query{false};
     uint64_t m_num_clpp_interpretations{0};
-    bool m_ignore_case{false};
-    std::unique_ptr<log_surgeon::Parser> m_parser;
-    absl::flat_hash_map<std::pair<std::string, std::string>, clpp::DecomposedQuery>
-            m_decomposed_query_cache;
-    std::unordered_map<clpp::log_shape_id_t, std::vector<int32_t>> m_log_shape_id_to_schema_id;
+    ClppMatcher m_clpp_matcher;
 
     /**
      * Expands a wildcard at a CLPP node (LogMessage or ParentRule) by iterating
@@ -322,6 +305,27 @@ private:
     );
 
     /**
+     * Computes the set of literal types a column may resolve to, as a bitmask.
+     *
+     * A column can map to a different node (and therefore a different literal type) in each schema,
+     * so the mask is the union of its node types across several schemas. split_expression_by_schema
+     * later replaces this mask with the single type the column has in one specific schema.
+     *
+     * For a column resolved by ClppMatcher, `schemas` is ignored: ClppMatcher already determined
+     * exactly which schemas the query matched, so the union is taken over those schemas instead.
+     * For any other column, the union is taken over the schemas in `schemas` that the column also
+     * maps to.
+     *
+     * @param column The column whose mask is being computed.
+     * @param schemas The schemas to take the union over.
+     * @return The bitmask of literal types.
+     */
+    [[nodiscard]] auto compute_candidate_types(
+            ast::ColumnDescriptor const& column,
+            std::set<int32_t> const& schemas
+    ) const -> ast::literal_type_bitmask_t;
+
+    /**
      * Splits an expression into sub-expressions based on the schemas it searches against
      * @param expr
      * @param queries a map from schema id to expression
@@ -341,14 +345,19 @@ private:
     int32_t get_column_id_for_descriptor(ast::ColumnDescriptor::id_t col_id, int32_t schema);
 
     /**
-     * Marks a column as CLPP-resolved and registers its schema-to-node-id mappings
-     * in m_descriptor_to_schema. Must be called during the first pass so that the
-     * correct schema subset is preserved — m_descriptor_to_schema is not cleared
-     * between passes, and the is_clpp_resolved flag prevents re-registration in
-     * m_column_to_descriptor which would cause populate_schema_mapping to inflate
-     * the mappings.
+     * Marks a column as clpp-resolved and records (`in m_descriptor_to_schema`) that the column
+     * resolves to `node_id` in each of `matched_schema_ids`.
+     *
+     * ClppMatcher matched only the schemas whose shape satisfied the query, and that subset must
+     * survive to the end of SchemaMatch::run. Two things preserve it:
+     * - run() clears m_column_to_descriptor before re-running populate_column_mapping, but leaves
+     *   m_descriptor_to_schema intact, so these mappings survive.
+     * - The is_clpp_resolved flag keeps the column out of m_column_to_descriptor, so
+     *   populate_schema_mapping skips it. That function maps a column to every schema containing its
+     *   node, which for a clpp column would add back the schemas whose shape did not match.
+     *
      * @param column The column descriptor to register.
-     * @param node_id The schema-tree node ID to anchor the column at.
+     * @param node_id The schema-tree node ID to map to.
      * @param matched_schema_ids The schemas to register the column for.
      */
     auto register_clpp_resolved_column(
@@ -365,42 +374,6 @@ private:
     ast::LiteralType
     get_literal_type_for_column(ast::ColumnDescriptor::id_t col_id, int32_t schema);
 };
-
-template <StringViewPredicate Matcher>
-auto SchemaMatch::find_schemas_matching_predicate(
-        std::string_view column_name,
-        clp_s::LogShapeDictionaryReader& log_shape_dict,
-        Matcher const& matcher
-) -> std::unordered_set<int32_t> {
-    std::vector<clpp::log_shape_id_t> matched_shape_ids;
-    for (auto const& log_shape : log_shape_dict.get_entries()) {
-        auto const log_shape_str{std::string_view{log_shape.get_value()}};
-        if (column_name.empty()) {
-            if (matcher(log_shape_str)) {
-                matched_shape_ids.emplace_back(log_shape.get_id());
-            }
-        } else {
-            auto shapes{m_archive_reader->get_parent_rule_shapes().at(log_shape.get_id())};
-            for (auto const& parent_match : shapes.get()) {
-                if (column_name == parent_match.m_name
-                    && matcher(log_shape_str.substr(parent_match.m_start, parent_match.m_size)))
-                {
-                    matched_shape_ids.emplace_back(log_shape.get_id());
-                    break;
-                }
-            }
-        }
-    }
-    std::unordered_set<int32_t> schema_ids;
-    for (auto const id : matched_shape_ids) {
-        if (auto const it{m_log_shape_id_to_schema_id.find(id)};
-            m_log_shape_id_to_schema_id.end() != it)
-        {
-            schema_ids.insert(it->second.begin(), it->second.end());
-        }
-    }
-    return schema_ids;
-}
 }  // namespace clp_s::search
 
 #endif  // CLP_S_SEARCH_SCHEMAMATCH_HPP

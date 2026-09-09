@@ -100,11 +100,6 @@ auto evaluate_numeric_wildcard_filter(
 void QueryRunner::global_init() {
     populate_internal_columns();
     populate_string_queries(m_expr);
-    // Clpp interpretation filters are stored separately from the global query as they are already
-    // per-schema.
-    for (auto const& [schema_id, expr] : m_match->get_all_schema_queries()) {
-        populate_string_queries(expr);
-    }
 }
 
 auto QueryRunner::schema_init(int32_t schema_id) -> EvaluatedValue {
@@ -988,53 +983,51 @@ void QueryRunner::populate_string_queries(std::shared_ptr<Expression> const& exp
             std::string query_string;
             filter->get_operand()->as_clp_string(query_string, filter->get_operation());
 
-            if (m_string_query_map.count(query_string)) {
-                return;
+            if (false == m_string_query_map.contains(query_string)) {
+                // search on log type dictionary
+                clp::epochtime_t placeholder_timestamp{};
+                m_string_query_map.emplace(
+                        query_string,
+                        clp::GrepCore::process_raw_query(
+                                *m_log_dict,
+                                *m_var_dict,
+                                query_string,
+                                placeholder_timestamp,
+                                placeholder_timestamp,
+                                m_ignore_case,
+                                nullptr
+                        )
+                );
             }
-
-            // search on log type dictionary
-            clp::epochtime_t placeholder_timestamp{};
-            m_string_query_map.emplace(
-                    query_string,
-                    clp::GrepCore::process_raw_query(
-                            *m_log_dict,
-                            *m_var_dict,
-                            query_string,
-                            placeholder_timestamp,
-                            placeholder_timestamp,
-                            m_ignore_case,
-                            nullptr
-                    )
-            );
         }
 
         if (filter->get_column()->matches_type(LiteralType::VarStringT)) {
             std::string query_string;
             filter->get_operand()->as_var_string(query_string, filter->get_operation());
-            if (m_string_var_match_map.count(query_string)) {
-                return;
-            }
+            if (false == m_string_var_match_map.contains(query_string)) {
+                std::unordered_set<int64_t>& matching_vars = m_string_var_match_map[query_string];
+                if (false == ast::has_unescaped_wildcards(query_string)) {
+                    auto const unescaped_query_string{
+                            clp::string_utils::unescape_string(query_string)
+                    };
+                    auto const entries = m_var_dict->get_entry_matching_value(
+                            unescaped_query_string,
+                            m_ignore_case
+                    );
 
-            std::unordered_set<int64_t>& matching_vars = m_string_var_match_map[query_string];
-            if (false == ast::has_unescaped_wildcards(query_string)) {
-                auto const unescaped_query_string{clp::string_utils::unescape_string(query_string)};
-                auto const entries = m_var_dict->get_entry_matching_value(
-                        unescaped_query_string,
-                        m_ignore_case
-                );
-
-                for (auto const& entry : entries) {
-                    matching_vars.insert(entry->get_id());
-                }
-            } else {
-                std::unordered_set<VariableDictionaryEntry const*> matching_entries;
-                m_var_dict->get_entries_matching_wildcard_string(
-                        query_string,
-                        m_ignore_case,
-                        matching_entries
-                );
-                for (auto const& entry : matching_entries) {
-                    matching_vars.emplace(entry->get_id());
+                    for (auto const& entry : entries) {
+                        matching_vars.insert(entry->get_id());
+                    }
+                } else {
+                    std::unordered_set<VariableDictionaryEntry const*> matching_entries;
+                    m_var_dict->get_entries_matching_wildcard_string(
+                            query_string,
+                            m_ignore_case,
+                            matching_entries
+                    );
+                    for (auto const& entry : matching_entries) {
+                        matching_vars.emplace(entry->get_id());
+                    }
                 }
             }
         }
