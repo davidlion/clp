@@ -38,6 +38,7 @@ constexpr std::string_view cTestEndToEndInvalidFormattedFloatInputFile{
         "test_invalid_formatted_float.jsonl"
 };
 constexpr std::string_view cTestEndToEndTimestampInputFile{"test_timestamp.jsonl"};
+constexpr std::string_view cTestEndToEndEmptyContainersInputFile{"test_empty_containers.jsonl"};
 
 namespace {
 auto get_test_input_path_relative_to_tests_dir(std::string_view const test_input_path)
@@ -45,6 +46,10 @@ auto get_test_input_path_relative_to_tests_dir(std::string_view const test_input
 auto get_test_input_local_path(std::string_view const test_input_path) -> std::string;
 auto extract(bool experimental = false) -> std::filesystem::path;
 void compare(std::filesystem::path const& extracted_json_path);
+void compare_with_input(
+        std::string const& input_file_path,
+        std::filesystem::path const& extracted_json_path
+);
 void literallyCompare(
         std::filesystem::path const& expected_output_json_path,
         std::filesystem::path const& extracted_json_path
@@ -216,6 +221,34 @@ void literallyCompare(
     REQUIRE((0 == WEXITSTATUS(result)));
 }
 
+void compare_with_input(
+        std::string const& input_file_path,
+        std::filesystem::path const& extracted_json_path
+) {
+    int result{std::system("command -v jq >/dev/null 2>&1")};
+    REQUIRE((0 == result));
+    auto command = fmt::format(
+            "jq --sort-keys --compact-output '.' {} | sort > {}",
+            extracted_json_path.string(),
+            cTestEndToEndOutputSortedJson
+    );
+    result = std::system(command.c_str());
+    REQUIRE((0 == result));
+
+    REQUIRE((false == std::filesystem::is_empty(cTestEndToEndOutputSortedJson)));
+
+    result = std::system("command -v diff >/dev/null 2>&1");
+    REQUIRE((0 == result));
+    command = fmt::format(
+            "jq --sort-keys --compact-output '.' {} | sort | diff --unified - {} > /dev/null",
+            input_file_path,
+            cTestEndToEndOutputSortedJson
+    );
+    result = std::system(command.c_str());
+    REQUIRE((true == WIFEXITED(result)));
+    REQUIRE((0 == WEXITSTATUS(result)));
+}
+
 // NOLINTEND(cert-env33-c,concurrency-mt-unsafe)
 }  // namespace
 
@@ -338,6 +371,38 @@ TEST_CASE("clp-s-compress-extract-invalid-formatted-floats", "[clp-s][end-to-end
     auto extracted_json_path = extract(false);
     literallyCompare(
             get_test_input_local_path(cTestEndToEndInvalidFormattedFloatInputFile),
+            extracted_json_path
+    );
+}
+
+/**
+ * Tests that empty arrays and objects round-trip correctly under both array-structurization modes.
+ */
+TEST_CASE("clp-s-compress-extract-empty-containers", "[clp-s][end-to-end]") {
+    auto const structurize_arrays = GENERATE(true, false);
+    auto const single_file_archive = GENERATE(true, false);
+
+    TestOutputCleaner const test_cleanup{
+            {std::string{cTestEndToEndArchiveDirectory},
+             std::string{cTestEndToEndOutputDirectory},
+             std::string{cTestEndToEndOutputSortedJson}}
+    };
+
+    REQUIRE_NOTHROW(
+            std::ignore = compress_archive(
+                    get_test_input_local_path(cTestEndToEndEmptyContainersInputFile),
+                    std::string{cTestEndToEndArchiveDirectory},
+                    std::nullopt,
+                    false,
+                    single_file_archive,
+                    structurize_arrays
+            )
+    );
+    validate_archive_header();
+
+    auto const extracted_json_path = extract(false);
+    compare_with_input(
+            get_test_input_local_path(cTestEndToEndEmptyContainersInputFile),
             extracted_json_path
     );
 }

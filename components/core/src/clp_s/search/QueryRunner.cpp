@@ -989,8 +989,8 @@ void QueryRunner::populate_string_queries(std::shared_ptr<Expression> const& exp
                 m_string_query_map.emplace(
                         query_string,
                         clp::GrepCore::process_raw_query(
-                                *m_log_dict,
-                                *m_var_dict,
+                                *m_archive_reader->get_log_type_dictionary(),
+                                *m_archive_reader->get_variable_dictionary(),
                                 query_string,
                                 placeholder_timestamp,
                                 placeholder_timestamp,
@@ -1005,12 +1005,13 @@ void QueryRunner::populate_string_queries(std::shared_ptr<Expression> const& exp
             std::string query_string;
             filter->get_operand()->as_var_string(query_string, filter->get_operation());
             if (false == m_string_var_match_map.contains(query_string)) {
+                auto const var_dict{m_archive_reader->get_variable_dictionary()};
                 std::unordered_set<int64_t>& matching_vars = m_string_var_match_map[query_string];
                 if (false == ast::has_unescaped_wildcards(query_string)) {
                     auto const unescaped_query_string{
                             clp::string_utils::unescape_string(query_string)
                     };
-                    auto const entries = m_var_dict->get_entry_matching_value(
+                    auto const entries = var_dict->get_entry_matching_value(
                             unescaped_query_string,
                             m_ignore_case
                     );
@@ -1020,7 +1021,7 @@ void QueryRunner::populate_string_queries(std::shared_ptr<Expression> const& exp
                     }
                 } else {
                     std::unordered_set<VariableDictionaryEntry const*> matching_entries;
-                    m_var_dict->get_entries_matching_wildcard_string(
+                    var_dict->get_entries_matching_wildcard_string(
                             query_string,
                             m_ignore_case,
                             matching_entries

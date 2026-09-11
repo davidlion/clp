@@ -108,6 +108,20 @@ public:
     [[nodiscard]] auto has_section(std::string_view section) const -> bool;
 
     /**
+     * @param section
+     * @return The names of the sections stored before `section`, in on-disk order. Returns an
+     * empty vector for a multi-file archive, where every section has its own reader and can be
+     * read in any order.
+     */
+    [[nodiscard]] auto get_sections_before(std::string_view section) const
+            -> std::vector<std::string_view>;
+
+    /**
+     * @return Whether this archive is a single-file archive.
+     */
+    [[nodiscard]] auto is_single_file_archive() const -> bool { return m_single_file_archive; }
+
+    /**
      * @return true if the archive info packet set the experimental bool.
      */
     [[nodiscard]] auto experimental() const -> bool { return m_archive_info.experimental; }

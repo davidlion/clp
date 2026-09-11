@@ -71,8 +71,8 @@ public:
      * @return true if any visitor returned true, false otherwise.
      */
     template <typename NodeVisitor, typename ObjectVisitor>
-    [[nodiscard]] auto
-    visit_entries(NodeVisitor const& visit_node, ObjectVisitor const& visit_object) const -> bool;
+    auto visit_entries(NodeVisitor const& visit_node, ObjectVisitor const& visit_object) const
+            -> bool;
 
     /**
      * Scans the entries for a `LogMessage` unordered object and reads its log shape ID.
@@ -190,7 +190,7 @@ SchemaView::visit_entries(NodeVisitor const& visit_node, ObjectVisitor const& vi
 
 inline auto SchemaView::find_log_shape_id() const -> std::optional<clpp::log_shape_id_t> {
     std::optional<clpp::log_shape_id_t> log_shape_id;
-    static_cast<void>(visit_entries(
+    visit_entries(
             [](SchemaNode::id_t) -> bool { return false; },
             [&](UnorderedObject const& obj) -> bool {
                 if (obj.log_shape_id.has_value()) {
@@ -199,7 +199,7 @@ inline auto SchemaView::find_log_shape_id() const -> std::optional<clpp::log_sha
                 }
                 return false;
             }
-    ));
+    );
     return log_shape_id;
 }
 

@@ -39,7 +39,7 @@ public:
      * @param case_sensitive Whether matching is case sensitive.
      * @throws std::runtime_error if the log shape dictionary is not valid.
      */
-    ClppMatcher(std::shared_ptr<ArchiveReader> archive_reader, bool case_sensitive);
+    ClppMatcher(ArchiveReader* archive_reader, bool case_sensitive);
 
     // Methods
     /**
@@ -98,7 +98,7 @@ private:
             -> std::vector<std::string_view>;
 
     // Data members
-    std::shared_ptr<ArchiveReader> m_archive_reader;
+    ArchiveReader* m_archive_reader;
     bool m_case_sensitive{false};
     std::vector<std::unordered_set<int32_t>> m_schemas_by_log_shape;
     std::unique_ptr<log_surgeon::Parser> m_parser;

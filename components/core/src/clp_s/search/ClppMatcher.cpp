@@ -19,8 +19,8 @@
 #include <clpp/Interpretation.hpp>
 
 namespace clp_s::search {
-ClppMatcher::ClppMatcher(std::shared_ptr<ArchiveReader> archive_reader, bool case_sensitive)
-        : m_archive_reader{std::move(archive_reader)},
+ClppMatcher::ClppMatcher(ArchiveReader* archive_reader, bool case_sensitive)
+        : m_archive_reader{archive_reader},
           m_case_sensitive{case_sensitive} {
     if (false == m_archive_reader->experimental()) {
         return;
@@ -29,15 +29,14 @@ ClppMatcher::ClppMatcher(std::shared_ptr<ArchiveReader> archive_reader, bool cas
     if (nullptr == log_shape_dict) {
         throw std::runtime_error{"ClppMatcher got a null log shape dictionary"};
     }
-    log_shape_dict->read_entries();
 
-    m_schemas_by_log_shape.resize(
-            m_archive_reader->get_log_shape_dictionary()->get_entries().size()
-    );
+    m_schemas_by_log_shape.resize(log_shape_dict->get_entries().size());
     for (auto const& [schema_id, schema] : *m_archive_reader->get_schema_map()) {
         if (auto const log_shape_id{schema.get_view().find_log_shape_id()}) {
             if (*log_shape_id >= m_schemas_by_log_shape.size()) {
-                m_schemas_by_log_shape.resize(*log_shape_id + 1);
+                throw std::runtime_error{
+                        "ClppMatcher found a schema referencing an unknown log shape ID"
+                };
             }
             m_schemas_by_log_shape.at(*log_shape_id).emplace(schema_id);
         }

@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include <clp_s/Schema.hpp>
 #include <clp_s/search/ClppMatcher.hpp>
 #include <clpp/Interpretation.hpp>
 
@@ -66,20 +67,6 @@ public:
      * @param column
      */
     void add_searched_column_to_schema(int32_t schema, int32_t column);
-
-    /**
-     * Checks if the schema has an array field
-     * @param schema_id
-     * @return true if the schema has, false otherwise
-     */
-    bool has_array(int32_t schema_id);
-
-    /**
-     * Checks if the schema has an array field to be searched against
-     * @param schema_id
-     * @return true if the schema has, false otherwise
-     */
-    bool has_array_search(int32_t schema_id);
 
     /**
      * @return The total number of clpp interpretations created during schema matching. Every
@@ -206,6 +193,12 @@ private:
             ast::FilterExpr const& filter
     ) -> std::shared_ptr<ast::Expression>;
 
+    /**
+     * Reads the dictionaries needed to read the columns in the given schema view, recursing into
+     * unordered object sub-schemas.
+     */
+    auto read_dictionaries_for_schema(SchemaView const& schema) -> void;
+
     // Data members
     std::unordered_map<uint32_t, std::set<std::shared_ptr<ast::ColumnDescriptor>>>
             m_column_to_descriptor;
@@ -217,11 +210,11 @@ private:
     std::map<ast::ColumnDescriptor::id_t, std::set<int32_t>> m_unresolved_descriptor_to_descriptor;
     std::unordered_map<ast::Expression*, std::unordered_set<int32_t>> m_expression_to_schemas;
     std::unordered_set<int32_t> m_matched_schema_ids;
-    std::unordered_set<int32_t> m_array_schema_ids;
     std::unordered_set<int32_t> m_array_search_schema_ids;
     std::map<int32_t, std::shared_ptr<ast::Expression>> m_schema_to_query;
 
     std::unordered_map<int32_t, std::set<int32_t>> m_schema_to_searched_columns;
+    std::shared_ptr<ArchiveReader> m_archive_reader;
     std::shared_ptr<SchemaTree> m_tree;
     std::shared_ptr<ReaderUtils::SchemaMap> m_schemas;
     bool m_clpp_decomposed_query{false};

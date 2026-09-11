@@ -482,7 +482,7 @@ void SchemaReader::mark_unordered_object(
 
 auto SchemaReader::get_first_column_in_span(SchemaView sub_schema) -> SchemaNode::id_t {
     SchemaNode::id_t first_column_id{-1};
-    static_cast<void>(sub_schema.visit_entries(
+    sub_schema.visit_entries(
             [&](SchemaNode::id_t node_id) -> bool {
                 first_column_id = node_id;
                 return true;
@@ -499,7 +499,7 @@ auto SchemaReader::get_first_column_in_span(SchemaView sub_schema) -> SchemaNode
                 first_column_id = id;
                 return true;
             }
-    ));
+    );
     return first_column_id;
 }
 
@@ -588,7 +588,7 @@ auto SchemaReader::generate_structured_array_template(
     std::vector<int32_t> path_to_intersection;
     int32_t depth = m_global_schema_tree->get_node(array_root_id).get_depth();
 
-    static_cast<void>(schema.visit_entries(
+    schema.visit_entries(
             [&](SchemaNode::id_t global_column_id) -> bool {
                 auto const& node = m_global_schema_tree->get_node(global_column_id);
                 switch (node.get_type()) {
@@ -685,7 +685,7 @@ auto SchemaReader::generate_structured_array_template(
                 }
                 return false;
             }
-    ));
+    );
     return column_idx;
 }
 
@@ -698,7 +698,7 @@ auto SchemaReader::generate_structured_object_template(
     size_t column_idx = column_start;
     std::vector<int32_t> path_to_intersection;
 
-    static_cast<void>(schema.visit_entries(
+    schema.visit_entries(
             [&](SchemaNode::id_t global_column_id) -> bool {
                 auto const& node = m_global_schema_tree->get_node(global_column_id);
                 int32_t next_root = node.get_parent_id();
@@ -782,7 +782,7 @@ auto SchemaReader::generate_structured_object_template(
                 root = m_global_schema_tree->get_node(array_root).get_parent_id();
                 return false;
             }
-    ));
+    );
     find_intersection_and_fix_brackets(root, object_root, path_to_intersection);
     return column_idx;
 }
@@ -980,7 +980,7 @@ auto SchemaReader::collect_scope_entries(
 ) -> SchemaSpanContents {
     SchemaSpanContents scope;
     size_t column_reader_idx{start_column_reader_idx};
-    static_cast<void>(schema.visit_entries(
+    schema.visit_entries(
             [&](SchemaNode::id_t cur_node_id) -> bool {
                 auto const& node{m_global_schema_tree->get_node(cur_node_id)};
                 if (node_type_consumes_column(node.get_type())) {
@@ -1028,7 +1028,7 @@ auto SchemaReader::collect_scope_entries(
                         += count_column_consuming_entries(obj.sub_schema, *m_global_schema_tree);
                 return false;
             }
-    ));
+    );
 
     scope.next_column_reader_idx = column_reader_idx;
     return scope;

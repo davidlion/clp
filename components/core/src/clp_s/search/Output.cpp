@@ -34,8 +34,6 @@ using clp_s::search::ast::OrExpr;
 namespace clp_s::search {
 bool Output::filter() {
     std::vector<int32_t> matched_schemas;
-    bool has_array = false;
-    bool has_array_search = false;
 
     if (auto const result{m_archive_reader->read_metadata()}; result.has_error()) {
         auto const error{result.error()};
@@ -57,12 +55,6 @@ bool Output::filter() {
             matched_schemas.push_back(schema_id);
             m_result_metrics.num_archive_records_matching_schemas
                     += m_archive_reader->get_num_messages_for_schema(schema_id);
-            if (m_match->has_array(schema_id)) {
-                has_array = true;
-            }
-            if (m_match->has_array_search(schema_id)) {
-                has_array_search = true;
-            }
         }
     }
     m_result_metrics.num_matched_schemas = matched_schemas.size();
@@ -82,25 +74,6 @@ bool Output::filter() {
         m_termination_stage = cTerminationStageTimeRangeMatchingAfterColumnResolution;
         m_archive_reader->close();
         return true;
-    }
-
-    m_archive_reader->read_variable_dictionary();
-    m_archive_reader->read_log_type_dictionary();
-
-    if (has_array) {
-        if (has_array_search) {
-            m_archive_reader->read_array_dictionary();
-        } else {
-            m_archive_reader->read_array_dictionary(true);
-        }
-    }
-
-    // If the parent rule shapes are needed for projection, ensure they've been read before opening
-    // the packed streams as the reader checkout logic will prevent future reading.
-    if (m_archive_reader->get_log_shape_dictionary() != nullptr
-        && false == m_archive_reader->get_projection()->is_return_all_columns())
-    {
-        std::ignore = m_archive_reader->get_parent_rule_shapes();
     }
 
     m_query_runner.global_init();

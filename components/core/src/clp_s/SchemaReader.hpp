@@ -510,7 +510,7 @@ private:
      */
     template <typename Visit>
     auto for_each_parent_rule_scope(SchemaView schema, Visit const& visit) -> void {
-        static_cast<void>(schema.visit_entries(
+        schema.visit_entries(
                 [](SchemaNode::id_t) -> bool { return false; },
                 [&](UnorderedObject const& obj) -> bool {
                     if (NodeType::ParentRule != obj.type) {
@@ -520,7 +520,7 @@ private:
                     for_each_parent_rule_scope(obj.sub_schema, visit);
                     return false;
                 }
-        ));
+        );
     }
 
     /**

@@ -20,6 +20,7 @@
 #include <clp_s/archive_constants.hpp>
 #include <clp_s/ArchiveReader.hpp>
 #include <clp_s/ErrorCode.hpp>
+#include <clp_s/Schema.hpp>
 #include <clp_s/SchemaTree.hpp>
 #include <clp_s/search/ast/AndExpr.hpp>
 #include <clp_s/search/ast/ColumnDescriptor.hpp>
@@ -73,9 +74,10 @@ auto get_subtree_node_type(std::string_view subtree_type) -> NodeType {
 // TODO: write proper iterators on the AST to make this code less awful.
 // In particular schema intersection needs AST iterators and a proper refactor
 SchemaMatch::SchemaMatch(std::shared_ptr<ArchiveReader> archive_reader, bool case_sensitive)
-        : m_tree(archive_reader->get_schema_tree()),
-          m_schemas(archive_reader->get_schema_map()),
-          m_clpp_matcher(std::move(archive_reader), case_sensitive) {}
+        : m_archive_reader(std::move(archive_reader)),
+          m_tree(m_archive_reader->get_schema_tree()),
+          m_schemas(m_archive_reader->get_schema_map()),
+          m_clpp_matcher(m_archive_reader.get(), case_sensitive) {}
 
 std::shared_ptr<Expression> SchemaMatch::run(std::shared_ptr<Expression>& expr) {
     ConstantProp propagate_empty;
@@ -106,6 +108,10 @@ std::shared_ptr<Expression> SchemaMatch::run(std::shared_ptr<Expression>& expr) 
     }
 
     split_expression_by_schema(expr, m_schema_to_query, m_matched_schema_ids);
+
+    for (auto const schema_id : m_matched_schema_ids) {
+        read_dictionaries_for_schema((*m_schemas)[schema_id].get_view());
+    }
 
     return expr;
 }
@@ -473,9 +479,6 @@ void SchemaMatch::populate_schema_mapping() {
     for (auto& it : *m_schemas) {
         int32_t schema_id = it.first;
         it.second.get_view().for_each_node_id([&](SchemaNode::id_t column_id) -> void {
-            if (NodeType::UnstructuredArray == m_tree->get_node(column_id).get_type()) {
-                m_array_schema_ids.insert(schema_id);
-            }
             if (false == m_column_to_descriptor.contains(column_id)) {
                 return;
             }
@@ -836,12 +839,37 @@ void SchemaMatch::add_searched_column_to_schema(int32_t schema, int32_t column) 
     m_schema_to_searched_columns[schema].insert(column);
 }
 
-bool SchemaMatch::has_array(int32_t schema_id) {
-    return m_array_schema_ids.count(schema_id);
-}
-
-bool SchemaMatch::has_array_search(int32_t schema_id) {
-    return m_array_search_schema_ids.count(schema_id);
+auto SchemaMatch::read_dictionaries_for_schema(SchemaView const& schema) -> void {
+    schema.visit_entries(
+            [&](SchemaNode::id_t column_id) -> bool {
+                switch (m_tree->get_node(column_id).get_type()) {
+                    case NodeType::DictionaryFloat:
+                    case NodeType::VarString:
+                        m_archive_reader->get_variable_dictionary();
+                        break;
+                    case NodeType::ClpString:
+                        m_archive_reader->get_variable_dictionary();
+                        m_archive_reader->get_log_type_dictionary();
+                        break;
+                    case NodeType::UnstructuredArray:
+                        m_archive_reader->get_variable_dictionary();
+                        m_archive_reader->get_array_dictionary();
+                        break;
+                    default:
+                        break;
+                }
+                return false;
+            },
+            [&](UnorderedObject const& obj) -> bool {
+                if (NodeType::LogMessage == obj.type) {
+                    m_archive_reader->get_log_shape_dictionary();
+                } else if (NodeType::ParentRule == obj.type) {
+                    m_archive_reader->get_parent_rule_shapes();
+                }
+                read_dictionaries_for_schema(obj.sub_schema);
+                return false;
+            }
+    );
 }
 
 LiteralType

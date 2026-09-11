@@ -333,9 +333,7 @@ auto output_archive_stats(
         clp_s::ArchiveReader& archive_reader,
         clp_s::search::OutputHandler& output_handler
 ) -> void {
-    archive_reader.read_variable_dictionary();
     auto const num_vars{archive_reader.get_variable_dictionary()->get_entries().size()};
-    archive_reader.read_log_type_dictionary();
     size_t num_log_shapes{};
     if (auto const log_shape_dict{archive_reader.get_log_shape_dictionary()};
         nullptr != log_shape_dict)
@@ -362,7 +360,6 @@ auto output_log_shape_stats(
         nullptr != log_shape_dict)
     {
         auto const& shape_stats{archive_reader.get_log_shape_stats()};
-        log_shape_dict->read_entries();
         for (clpp::log_shape_id_t i{0}; i < shape_stats.size(); ++i) {
             nlohmann::json entry{
                     {"archive_id", archive_id},
@@ -375,7 +372,6 @@ auto output_log_shape_stats(
         }
     } else {
         auto const log_type_dict{archive_reader.get_log_type_dictionary()};
-        archive_reader.read_log_type_dictionary();
         for (auto const& entry : log_type_dict->get_entries()) {
             nlohmann::json json_entry{
                     {"archive_id", archive_id},

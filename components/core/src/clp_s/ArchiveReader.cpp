@@ -78,7 +78,9 @@ auto ArchiveReader::initialize_archive_reader() -> void {
     }
 
     m_schema_tree = ReaderUtils::read_schema_tree(*m_archive_reader_adaptor);
+    m_read_sections.emplace(constants::cArchiveSchemaTreeFile);
     m_schema_map = ReaderUtils::read_schemas(*m_archive_reader_adaptor);
+    m_read_sections.emplace(constants::cArchiveSchemaMapFile);
 
     m_log_event_idx_column_id = m_schema_tree->get_metadata_field_id(constants::cLogEventIdxName);
 
@@ -142,7 +144,11 @@ auto ArchiveReader::read_single_schema_metadata()
 }
 
 auto ArchiveReader::read_metadata() -> ystdlib::error_handling::Result<void> {
+    if (m_read_sections.contains(constants::cArchiveTableMetadataFile)) {
+        return ystdlib::error_handling::success();
+    }
     constexpr size_t cDecompressorFileReadBufferCapacity{64 * 1024};  // 64 KiB
+    ensure_section_readable(constants::cArchiveTableMetadataFile);
     auto table_metadata_reader = m_archive_reader_adaptor->checkout_reader_for_section(
             constants::cArchiveTableMetadataFile
     );
@@ -207,6 +213,7 @@ auto ArchiveReader::read_metadata() -> ystdlib::error_handling::Result<void> {
     m_table_metadata_decompressor.close();
 
     m_archive_reader_adaptor->checkin_reader_for_section(constants::cArchiveTableMetadataFile);
+    m_read_sections.emplace(constants::cArchiveTableMetadataFile);
 
     return ystdlib::error_handling::success();
 }
@@ -215,13 +222,92 @@ void ArchiveReader::read_dictionaries_and_metadata() {
     if (auto const result{read_metadata()}; result.has_error()) {
         throw OperationFailed(ErrorCodeFailure, __FILENAME__, __LINE__);
     }
-    m_var_dict->read_entries();
+    get_variable_dictionary();
     if (m_clpp.has_value()) {
-        m_clpp->log_shape_dict->read_entries();
+        get_log_shape_dictionary();
     } else {
-        m_log_dict->read_entries();
+        get_log_type_dictionary();
     }
-    m_array_dict->read_entries();
+    get_array_dictionary();
+}
+
+auto ArchiveReader::ensure_section_readable(std::string_view section) -> void {
+    if (false == m_archive_reader_adaptor->is_single_file_archive()) {
+        return;
+    }
+    for (auto const prior : m_archive_reader_adaptor->get_sections_before(section)) {
+        if (m_read_sections.contains(prior)) {
+            continue;
+        }
+        if (constants::cArchiveSchemaTreeFile == prior || constants::cArchiveSchemaMapFile == prior)
+        {
+            m_read_sections.emplace(prior);
+        } else if (constants::cArchiveTableMetadataFile == prior) {
+            if (auto const result{read_metadata()}; result.has_error()) {
+                throw OperationFailed(ErrorCodeFailure, __FILENAME__, __LINE__);
+            }
+        } else if (constants::cArchiveVarDictFile == prior) {
+            get_variable_dictionary();
+        } else if (constants::cArchiveLogDictFile == prior) {
+            if (m_clpp.has_value()) {
+                get_log_shape_dictionary();
+            } else {
+                get_log_type_dictionary();
+            }
+        } else if (constants::cArchiveArrayDictFile == prior) {
+            get_array_dictionary();
+        } else if (constants::cArchiveParentRuleShapesFile == prior) {
+            get_parent_rule_shapes();
+        } else if (constants::cArchiveLogShapeStatsFile == prior) {
+            get_log_shape_stats();
+        } else if (constants::cArchiveParsingSpecFile == prior) {
+            std::ignore = read_parsing_spec();
+        } else {
+            SPDLOG_WARN("No reader for single-file archive section {}.", prior);
+        }
+    }
+}
+
+auto ArchiveReader::get_variable_dictionary() -> std::shared_ptr<VariableDictionaryReader> {
+    if (false == m_read_sections.contains(constants::cArchiveVarDictFile)) {
+        ensure_section_readable(constants::cArchiveVarDictFile);
+        m_read_sections.emplace(constants::cArchiveVarDictFile);
+        m_var_dict->read_entries(true);
+    }
+    return m_var_dict;
+}
+
+auto ArchiveReader::get_log_type_dictionary() -> std::shared_ptr<LogTypeDictionaryReader> {
+    if (m_clpp.has_value()) {
+        return nullptr;
+    }
+    if (false == m_read_sections.contains(constants::cArchiveLogDictFile)) {
+        ensure_section_readable(constants::cArchiveLogDictFile);
+        m_read_sections.emplace(constants::cArchiveLogDictFile);
+        m_log_dict->read_entries(true);
+    }
+    return m_log_dict;
+}
+
+auto ArchiveReader::get_log_shape_dictionary() -> std::shared_ptr<LogShapeDictionaryReader> {
+    if (false == m_clpp.has_value()) {
+        return nullptr;
+    }
+    if (false == m_read_sections.contains(constants::cArchiveLogDictFile)) {
+        ensure_section_readable(constants::cArchiveLogDictFile);
+        m_read_sections.emplace(constants::cArchiveLogDictFile);
+        m_clpp->log_shape_dict->read_entries(true);
+    }
+    return m_clpp->log_shape_dict;
+}
+
+auto ArchiveReader::get_array_dictionary() -> std::shared_ptr<LogTypeDictionaryReader> {
+    if (false == m_read_sections.contains(constants::cArchiveArrayDictFile)) {
+        ensure_section_readable(constants::cArchiveArrayDictFile);
+        m_read_sections.emplace(constants::cArchiveArrayDictFile);
+        m_array_dict->read_entries(true);
+    }
+    return m_array_dict;
 }
 
 auto ArchiveReader::get_log_shape_stats() -> clpp::LogShapeStatArray const& {
@@ -229,6 +315,8 @@ auto ArchiveReader::get_log_shape_stats() -> clpp::LogShapeStatArray const& {
         throw OperationFailed(ErrorCodeBadParam, __FILENAME__, __LINE__);
     }
     if (false == m_clpp->log_shape_stats.has_value()) {
+        ensure_section_readable(constants::cArchiveLogShapeStatsFile);
+        m_read_sections.emplace(constants::cArchiveLogShapeStatsFile);
         auto result{read_log_shape_stats()};
         if (result.has_error()) {
             throw OperationFailed(ErrorCodeFailure, __FILENAME__, __LINE__);
@@ -243,6 +331,8 @@ auto ArchiveReader::get_parent_rule_shapes() -> clpp::ParentRuleShapesArray cons
         throw OperationFailed(ErrorCodeBadParam, __FILENAME__, __LINE__);
     }
     if (false == m_clpp->parent_rule_shapes.has_value()) {
+        ensure_section_readable(constants::cArchiveParentRuleShapesFile);
+        m_read_sections.emplace(constants::cArchiveParentRuleShapesFile);
         auto result{read_parent_rule_shapes()};
         if (result.has_error()) {
             throw OperationFailed(ErrorCodeFailure, __FILENAME__, __LINE__);
@@ -253,6 +343,7 @@ auto ArchiveReader::get_parent_rule_shapes() -> clpp::ParentRuleShapesArray cons
 }
 
 void ArchiveReader::open_packed_streams() {
+    ensure_section_readable(constants::cArchiveTablesFile);
     m_stream_reader.open_packed_streams(m_archive_reader_adaptor);
 }
 
@@ -376,7 +467,7 @@ auto ArchiveReader::append_unordered_reader_columns(
         bool should_marshal_records
 ) -> void {
     size_t const object_begin_pos{reader.get_column_size()};
-    static_cast<void>(sub_schema.visit_entries(
+    sub_schema.visit_entries(
             [&](SchemaNode::id_t node_id) -> bool {
                 switch (m_schema_tree->get_node(node_id).get_type()) {
                     case NodeType::Integer:
@@ -451,7 +542,7 @@ auto ArchiveReader::append_unordered_reader_columns(
                 );
                 return false;
             }
-    ));
+    );
 
     if (should_marshal_records) {
         reader.mark_unordered_object(
@@ -499,7 +590,7 @@ void ArchiveReader::initialize_schema_reader(
         }
     }
 
-    static_cast<void>(schema.get_unordered_schema_view().visit_entries(
+    schema.get_unordered_schema_view().visit_entries(
             [&](SchemaNode::id_t node_id) -> bool {
                 // A lone MST node ID entry in the unordered region is only allowed when the ID is
                 // the root of the unordered object, so we can pass it directly to
@@ -523,7 +614,7 @@ void ArchiveReader::initialize_schema_reader(
                 );
                 return false;
             }
-    ));
+    );
 }
 
 void ArchiveReader::store(FileWriter& writer) {
@@ -604,6 +695,8 @@ auto ArchiveReader::read_parsing_spec() -> ystdlib::error_handling::Result<std::
     if (false == m_clpp.has_value()) {
         return clpp::ClppErrorCode{clpp::ClppErrorCodeEnum::BadParam};
     }
+    ensure_section_readable(constants::cArchiveParsingSpecFile);
+    m_read_sections.emplace(constants::cArchiveParsingSpecFile);
     return ReaderUtils::read_parsing_spec(*m_archive_reader_adaptor);
 }
 

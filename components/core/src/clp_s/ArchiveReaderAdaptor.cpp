@@ -341,6 +341,13 @@ std::unique_ptr<clp::ReaderInterface> ArchiveReaderAdaptor::checkout_reader_for_
     }
 
     if (curr_pos > file_offset) {
+        SPDLOG_ERROR(
+                "Single-file archive sections must be read in on-disk order; cannot read '{}' at "
+                "offset {} when the reader is already at offset {}.",
+                section,
+                file_offset,
+                curr_pos
+        );
         throw OperationFailed(ErrorCodeCorrupt, __FILENAME__, __LINE__);
     }
 
@@ -374,6 +381,21 @@ auto ArchiveReaderAdaptor::has_section(std::string_view section) const -> bool {
                    m_archive_file_info.files.end(),
                    [&](ArchiveFileInfo const& info) { return info.n == section; }
            );
+}
+
+auto ArchiveReaderAdaptor::get_sections_before(std::string_view section) const
+        -> std::vector<std::string_view> {
+    if (false == m_single_file_archive) {
+        return {};
+    }
+    std::vector<std::string_view> sections;
+    for (auto const& info : m_archive_file_info.files) {
+        if (info.n == section) {
+            break;
+        }
+        sections.emplace_back(info.n);
+    }
+    return sections;
 }
 
 auto ArchiveReaderAdaptor::get_metadata_for_log_event(int64_t log_event_idx)

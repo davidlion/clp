@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -79,36 +80,15 @@ public:
     void open_packed_streams();
 
     /**
-     * Reads the variable dictionary from the archive.
-     * @param lazy
-     * @return the variable dictionary reader
+     * For single-file archives, reads the sections stored before `section` if they haven't already
+     * been read. For multi-file archives, this function is a no-op as it is possible to read
+     * sections out of order.
+     *
+     * @param section
+     * @throws OperationFailed(ErrorCodeFailure) if metadata reading fails.
+     * @throw Propagates exceptions from the `get_` function of each archive section.
      */
-    std::shared_ptr<VariableDictionaryReader> read_variable_dictionary(bool lazy = false) {
-        m_var_dict->read_entries(lazy);
-        return m_var_dict;
-    }
-
-    /**
-     * Reads the log type dictionary from the archive.
-     * @param lazy
-     */
-    auto read_log_type_dictionary(bool lazy = false) -> void {
-        if (m_clpp.has_value()) {
-            m_clpp->log_shape_dict->read_entries(lazy);
-        } else {
-            m_log_dict->read_entries(lazy);
-        }
-    }
-
-    /**
-     * Reads the array dictionary from the archive.
-     * @param lazy
-     * @return the array dictionary reader
-     */
-    std::shared_ptr<LogTypeDictionaryReader> read_array_dictionary(bool lazy = false) {
-        m_array_dict->read_entries(lazy);
-        return m_array_dict;
-    }
+    auto ensure_section_readable(std::string_view section) -> void;
 
     /**
      * Reads the log type statistics from the archive.
@@ -153,20 +133,27 @@ public:
 
     std::string_view get_archive_id() { return m_archive_id; }
 
-    std::shared_ptr<VariableDictionaryReader> get_variable_dictionary() { return m_var_dict; }
+    /**
+     * @return The variable dictionary, reading it from the archive if it hasn't been read yet.
+     */
+    auto get_variable_dictionary() -> std::shared_ptr<VariableDictionaryReader>;
 
-    std::shared_ptr<LogTypeDictionaryReader> get_log_type_dictionary() { return m_log_dict; }
+    /**
+     * @return The log type dictionary, reading it from the archive if it hasn't been read yet.
+     * Always null for an experimental archive, which stores log shapes instead.
+     */
+    auto get_log_type_dictionary() -> std::shared_ptr<LogTypeDictionaryReader>;
 
-    [[nodiscard]] auto experimental() const -> bool { return m_clpp.has_value(); }
+    /**
+     * @return The array dictionary, reading it from the archive if it hasn't been read yet.
+     */
+    auto get_array_dictionary() -> std::shared_ptr<LogTypeDictionaryReader>;
 
-    std::shared_ptr<LogTypeDictionaryReader> get_array_dictionary() { return m_array_dict; }
-
-    auto get_log_shape_dictionary() -> std::shared_ptr<LogShapeDictionaryReader> {
-        if (false == m_clpp.has_value()) {
-            return nullptr;
-        }
-        return m_clpp->log_shape_dict;
-    }
+    /**
+     * @return The log shape dictionary, reading it from the archive if it hasn't been read yet, or
+     * null if the archive isn't experimental.
+     */
+    auto get_log_shape_dictionary() -> std::shared_ptr<LogShapeDictionaryReader>;
 
     std::shared_ptr<TimestampDictionaryReader> get_timestamp_dictionary() {
         return m_archive_reader_adaptor->get_timestamp_dictionary();
@@ -244,6 +231,8 @@ public:
     [[nodiscard]] auto get_metadata_for_log_event(int64_t log_event_idx) -> nlohmann::json const& {
         return m_archive_reader_adaptor->get_metadata_for_log_event(log_event_idx);
     }
+
+    [[nodiscard]] auto experimental() const -> bool { return m_clpp.has_value(); }
 
 private:
     // Types
@@ -352,6 +341,7 @@ private:
     std::shared_ptr<LogTypeDictionaryReader> m_log_dict;
     std::shared_ptr<LogTypeDictionaryReader> m_array_dict;
     std::shared_ptr<ArchiveReaderAdaptor> m_archive_reader_adaptor;
+    std::unordered_set<std::string_view> m_read_sections;
 
     std::shared_ptr<SchemaTree> m_schema_tree;
     std::shared_ptr<ReaderUtils::SchemaMap> m_schema_map;
