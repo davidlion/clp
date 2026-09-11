@@ -1,6 +1,5 @@
 #include "ClppMatcher.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -47,33 +46,12 @@ auto ClppMatcher::find_matching_schemas(
         std::string_view rule_name,
         std::optional<std::string_view> shape_query
 ) const -> std::unordered_set<int32_t> {
-    std::unordered_set<int32_t> schema_ids;
-    for (clpp::log_shape_id_t log_shape_id{0};
-         log_shape_id < m_archive_reader->get_log_shape_dictionary()->get_entries().size();
-         ++log_shape_id)
-    {
-        auto const shapes{get_shapes(log_shape_id, rule_name)};
-        bool const matched{
-                shape_query.has_value()
-                        ? std::ranges::any_of(
-                                  shapes,
-                                  [&](std::string_view shape) -> bool {
-                                      return clp::string_utils::wildcard_match_unsafe(
-                                              shape,
-                                              *shape_query,
-                                              m_case_sensitive
-                                      );
-                                  }
-                          )
-                        : false == shapes.empty()
-        };
-        if (false == matched) {
-            continue;
-        }
-        auto const& shape_schemas{m_schemas_by_log_shape.at(log_shape_id)};
-        schema_ids.insert(shape_schemas.begin(), shape_schemas.end());
+    if (shape_query.has_value()) {
+        return schemas_for_matching_shapes(rule_name, [&](std::string_view shape) -> bool {
+            return clp::string_utils::wildcard_match_unsafe(shape, *shape_query, m_case_sensitive);
+        });
     }
-    return schema_ids;
+    return schemas_for_matching_shapes(rule_name, [](std::string_view) -> bool { return true; });
 }
 
 auto ClppMatcher::decompose_query(std::string_view query, std::string_view rule_name)
@@ -129,27 +107,13 @@ auto ClppMatcher::decompose_by_rule_name(std::string_view query, std::string_vie
     std::vector<InterpretationMatch> matches;
     matches.reserve(interpretations.size());
     for (auto& interpretation : interpretations) {
-        std::unordered_set<int32_t> schema_ids;
-        for (clpp::log_shape_id_t log_shape_id{0};
-             log_shape_id < m_archive_reader->get_log_shape_dictionary()->get_entries().size();
-             ++log_shape_id)
-        {
-            auto const matched{std::ranges::any_of(
-                    get_shapes(log_shape_id, rule_name),
-                    [&](std::string_view shape) -> bool {
-                        return clp::string_utils::wildcard_match_unsafe(
-                                shape,
-                                interpretation.m_shape_query.view(),
-                                m_case_sensitive
-                        );
-                    }
-            )};
-            if (false == matched) {
-                continue;
-            }
-            auto const& shape_schemas{m_schemas_by_log_shape.at(log_shape_id)};
-            schema_ids.insert(shape_schemas.begin(), shape_schemas.end());
-        }
+        auto schema_ids{schemas_for_matching_shapes(rule_name, [&](std::string_view shape) -> bool {
+            return clp::string_utils::wildcard_match_unsafe(
+                    shape,
+                    interpretation.m_shape_query.view(),
+                    m_case_sensitive
+            );
+        })};
         if (schema_ids.empty()) {
             continue;
         }

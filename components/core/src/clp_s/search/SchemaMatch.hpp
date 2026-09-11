@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <clp_s/Schema.hpp>
+#include <clp_s/search/ast/FilterOperation.hpp>
 #include <clp_s/search/ClppMatcher.hpp>
 #include <clpp/Interpretation.hpp>
 
@@ -109,6 +110,9 @@ private:
      * segments are appended to the input column's descriptor tokens, so the result is a
      * column descriptor rather than a rule name.
      *
+     * A rule name may resolve to several nodes because schema nodes are keyed by both name and
+     * type, so one pair is returned per matching node.
+     *
      * @param column The original column descriptor triggering clpp decomposition.
      * @param root_node_id The schema node where decomposition is rooted.
      * @param rule_names The split rule names from the log-surgeon qualified name.
@@ -138,6 +142,7 @@ private:
      * whose shapes (log shape or `rule_name` parent rule shapes) satisfying `shape_query`, and
      * returns an EXISTS filter over the resolved column descriptor.
      * @param shape_query A wildcard pattern, or std::nullopt to match every shape.
+     * @param op The operation to apply to the resolved column.
      * @return The filter expression, or nullptr if no schemas match.
      */
     auto build_shape_match_filter(
@@ -145,6 +150,7 @@ private:
             SchemaNode::id_t root_node_id,
             std::string_view rule_name,
             std::optional<std::string_view> shape_query,
+            ast::FilterOperation op,
             bool is_inverted
     ) -> std::shared_ptr<ast::Expression>;
 
@@ -176,7 +182,7 @@ private:
      * against whole log shapes, and at a ParentRule node only against that rule's shapes.
      *
      * There are 3 possible filter cases:
-     * 1. EXISTS: matches every schema that contains the node.
+     * 1. EXISTS/NEXISTS: matches every schema that contains the node.
      * 2. shape(): matches the schemas containing shapes satisfying the query.
      * 3. Any other operation: the query is decomposed into interpretations, each expanded
      *   into leaf filters.
@@ -185,7 +191,9 @@ private:
      * @param root_node_id The schema-tree node where decomposition is rooted (LogMessage or
      * ParentRule).
      * @param filter The FilterExpr containing the operation and operand.
-     * @return The transformed expression on success, nullptr otherwise.
+     * @return The transformed expression on success, or nullptr if no schema matches, the filter
+     * has no operand, or the operand can not be converted to a string for the filter's operation
+     * (e.g. a range operation).
      */
     auto build_clpp_query_filter(
             std::shared_ptr<ast::ColumnDescriptor> const& column,

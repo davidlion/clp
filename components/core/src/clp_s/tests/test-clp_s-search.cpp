@@ -275,7 +275,8 @@ TEST_CASE("clp-s-search-experimental", "[clp-s][search][clpp]") {
             {R"aa(arr.b > 1000)aa", {7, 8}},
             {R"aa(var_string: *)aa", {9}},
             {R"aa(idx: * AND NOT idx: null AND idx: 0)aa", {0}},
-            {R"aa(one > 0.9 AND one < 1.1 AND one: 1.0)aa", {13}}
+            {R"aa(one > 0.9 AND one < 1.1 AND one: 1.0)aa", {13}},
+            {R"aa(msg > "foo")aa", {}}
     };
     auto const single_file_archive = GENERATE(true, false);
 

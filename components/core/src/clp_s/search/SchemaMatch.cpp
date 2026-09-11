@@ -8,6 +8,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -19,7 +20,6 @@
 
 #include <clp_s/archive_constants.hpp>
 #include <clp_s/ArchiveReader.hpp>
-#include <clp_s/ErrorCode.hpp>
 #include <clp_s/Schema.hpp>
 #include <clp_s/SchemaTree.hpp>
 #include <clp_s/search/ast/AndExpr.hpp>
@@ -33,7 +33,6 @@
 #include <clp_s/search/ast/OrExpr.hpp>
 #include <clp_s/search/ast/OrOfAndForm.hpp>
 #include <clp_s/search/ast/StringLiteral.hpp>
-#include <clp_s/TraceableException.hpp>
 #include <clpp/Defs.hpp>
 #include <clpp/Interpretation.hpp>
 
@@ -914,37 +913,32 @@ auto SchemaMatch::resolve_leaf_rule_descriptors(
 
     auto base_col{column->copy_with_new_id()};
     auto& base_descriptors{base_col->get_descriptor_list()};
-    SchemaNode::id_t node_id{root_node_id};
+    std::vector<SchemaNode::id_t> cur_node_ids{root_node_id};
     for (; seg_idx < rule_names.size(); ++seg_idx) {
         auto const token{rule_names.at(seg_idx)};
         base_descriptors.emplace_back(DescriptorToken::create_descriptor_from_literal_token(token));
 
-        auto child_ids{find_child_nodes_by_key_name(node_id, token)};
-        if (child_ids.empty()) {
+        std::vector<SchemaNode::id_t> next_node_ids;
+        for (auto const node_id : cur_node_ids) {
+            auto child_ids{find_child_nodes_by_key_name(node_id, token)};
+            next_node_ids.insert(next_node_ids.end(), child_ids.begin(), child_ids.end());
+        }
+        if (next_node_ids.empty()) {
             return std::nullopt;
         }
-
-        if (seg_idx < rule_names.size() - 1) {
-            if (child_ids.size() > 1) {
-                throw DescriptorToken::OperationFailed(ErrorCodeBadParam, __FILENAME__, __LINE__);
-            }
-            node_id = child_ids.front();
-        } else {
-            std::vector<std::pair<std::shared_ptr<ast::ColumnDescriptor>, SchemaNode::id_t>>
-                    results;
-            results.reserve(child_ids.size());
-            for (auto const child_id : child_ids) {
-                auto col{base_col->copy_with_new_id()};
-                col->set_matching_types(
-                        SchemaNode::node_to_literal_type(m_tree->get_node(child_id).get_type())
-                );
-                results.emplace_back(std::move(col), child_id);
-            }
-            return results;
-        }
+        cur_node_ids = std::move(next_node_ids);
     }
 
-    return std::nullopt;
+    std::vector<std::pair<std::shared_ptr<ast::ColumnDescriptor>, SchemaNode::id_t>> results;
+    results.reserve(cur_node_ids.size());
+    for (auto const node_id : cur_node_ids) {
+        auto col{base_col->copy_with_new_id()};
+        col->set_matching_types(
+                SchemaNode::node_to_literal_type(m_tree->get_node(node_id).get_type())
+        );
+        results.emplace_back(std::move(col), node_id);
+    }
+    return results;
 }
 
 auto SchemaMatch::register_clpp_resolved_column(
@@ -1014,6 +1008,7 @@ auto SchemaMatch::build_shape_match_filter(
         SchemaNode::id_t root_node_id,
         std::string_view rule_name,
         std::optional<std::string_view> shape_query,
+        FilterOperation op,
         bool is_inverted
 ) -> std::shared_ptr<ast::Expression> {
     auto const matched_schema_ids{m_clpp_matcher.find_matching_schemas(rule_name, shape_query)};
@@ -1022,7 +1017,7 @@ auto SchemaMatch::build_shape_match_filter(
     }
     auto clpp_column{column->copy_with_new_id()};
     register_clpp_resolved_column(clpp_column, root_node_id, matched_schema_ids);
-    return FilterExpr::create(clpp_column, FilterOperation::EXISTS, is_inverted);
+    return FilterExpr::create(clpp_column, op, is_inverted);
 }
 
 auto SchemaMatch::build_decomposed_query_filter(
@@ -1063,19 +1058,26 @@ auto SchemaMatch::build_clpp_query_filter(
 ) -> std::shared_ptr<ast::Expression> {
     auto const rule_name{m_tree->build_ls_rule_name(root_node_id)};
 
-    if (FilterOperation::EXISTS == filter.get_operation()) {
+    auto const op{filter.get_operation()};
+    if (FilterOperation::EXISTS == op || FilterOperation::NEXISTS == op) {
         return build_shape_match_filter(
                 column,
                 root_node_id,
                 rule_name,
                 std::nullopt,
+                op,
                 filter.is_inverted()
         );
     }
 
-    auto& operand{dynamic_cast<ast::Literal&>(*filter.get_operand())};
+    auto const operand{filter.get_operand()};
+    if (nullptr == operand) {
+        return nullptr;
+    }
     std::string query;
-    operand.as_var_string(query, filter.get_operation());
+    if (false == operand->as_var_string(query, op)) {
+        return nullptr;
+    }
 
     if (column->get_subtree_type().has_value()
         && clpp::cShapeFunction == column->get_subtree_type().value())
@@ -1085,6 +1087,7 @@ auto SchemaMatch::build_clpp_query_filter(
                 root_node_id,
                 rule_name,
                 query,
+                FilterOperation::EXISTS,
                 filter.is_inverted()
         );
     }
